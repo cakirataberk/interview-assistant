@@ -1,0 +1,29 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging artifacts
+build/
+dist/
+*.spec.bak
+*.egg-info/
+
+# Local runtime data
+recordings/
+
+# App local config / secrets
+*.env
+.env
+.interview_assistant/
+
