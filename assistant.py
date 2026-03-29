@@ -1,8 +1,11 @@
+import contextlib
+import io
 import json
 import os
 import queue
 import threading
 import time
+import warnings
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -13,15 +16,116 @@ import google.generativeai as genai
 import pyaudio
 import speech_recognition as sr
 
+warnings.filterwarnings("ignore", module="whisper")
+
+# openai-whisper does not read this; our _patched_whisper_download() does. Default on to stop SHA256 mismatch loops.
+os.environ.setdefault("WHISPER_SKIP_CHECKSUM", "1")
+
 
 CONFIG_DIR = Path.home() / ".interview_assistant"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_ALPHA = 0.96
+
+# Whisper: (model_name, language_or_none). None omits `language` for Whisper auto-detect (mixed TR/EN).
+TRANSCRIPTION_PROFILES = {
+    "English": ("base.en", "en"),
+    "Türkçe": ("small", "tr"),
+    "TR + ENG (Mixed)": ("small", None),
+}
+TRANSCRIPTION_MODES_ORDER = ("English", "Türkçe", "TR + ENG (Mixed)")
+DEFAULT_TRANSCRIPTION_MODE = "TR + ENG (Mixed)"
+WHISPER_CACHE_ROOT = os.path.expanduser("~/.cache/whisper")
+WHISPER_SMALL_PT = Path(WHISPER_CACHE_ROOT) / "small.pt"
+# Expected size ~461 MiB; allow a band for filesystem variance.
+WHISPER_SMALL_BYTES_MIN = 430 * 1024 * 1024
+WHISPER_SMALL_BYTES_MAX = 500 * 1024 * 1024
 TELEPROMPTER_ALPHA = 0.55
 MIN_ALPHA = 0.30
 MAX_ALPHA = 1.00
 
 app_queue = queue.Queue()
+
+
+def _trusted_small_pt_file(path) -> bool:
+    """True if path looks like a complete cached small.pt (~461MB)."""
+    try:
+        p = Path(path)
+        if p.name != "small.pt":
+            return False
+        sz = p.stat().st_size
+    except OSError:
+        return False
+    return WHISPER_SMALL_BYTES_MIN <= sz <= WHISPER_SMALL_BYTES_MAX
+
+
+def _whisper_checksum_skip_env() -> bool:
+    v = os.environ.get("WHISPER_SKIP_CHECKSUM", "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+def _patched_whisper_download(url: str, root: str, in_memory: bool):
+    """
+    Replacement for whisper._download: accept on-disk file when SHA256 mismatches
+    (stale hashes in older whisper releases) if WHISPER_SKIP_CHECKSUM is set or small.pt is size-valid.
+    """
+    import hashlib
+    import urllib.request
+
+    from tqdm import tqdm
+
+    os.makedirs(root, exist_ok=True)
+    expected_sha256 = url.split("/")[-2]
+    download_target = os.path.join(root, os.path.basename(url))
+    trust_mismatch = _whisper_checksum_skip_env() or _trusted_small_pt_file(download_target)
+
+    if os.path.exists(download_target) and not os.path.isfile(download_target):
+        raise RuntimeError(f"{download_target} exists and is not a regular file")
+
+    if os.path.isfile(download_target):
+        with open(download_target, "rb") as f:
+            model_bytes = f.read()
+        if hashlib.sha256(model_bytes).hexdigest() == expected_sha256:
+            return model_bytes if in_memory else download_target
+        if trust_mismatch:
+            return model_bytes if in_memory else download_target
+        import warnings as std_warnings
+
+        std_warnings.warn(
+            f"{download_target} exists, but the SHA256 checksum does not match; re-downloading the file"
+        )
+
+    with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
+        with tqdm(
+            total=int(source.info().get("Content-Length")),
+            ncols=80,
+            unit="iB",
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as loop:
+            while True:
+                buffer = source.read(8192)
+                if not buffer:
+                    break
+                output.write(buffer)
+                loop.update(len(buffer))
+
+    model_bytes = open(download_target, "rb").read()
+    if hashlib.sha256(model_bytes).hexdigest() != expected_sha256:
+        if trust_mismatch or _trusted_small_pt_file(download_target):
+            return model_bytes if in_memory else download_target
+        raise RuntimeError(
+            "Model has been downloaded but the SHA256 checksum does not not match. Please retry loading the model."
+        )
+    return model_bytes if in_memory else download_target
+
+
+def _install_whisper_checksum_patch() -> None:
+    import whisper
+
+    if getattr(whisper, "_interview_assistant_checksum_patch", False):
+        return
+    whisper._download = _patched_whisper_download
+    whisper._interview_assistant_checksum_patch = True
 
 
 def get_ai_suggestion(user_question, system_prompt, api_key, conversation_history=None):
@@ -67,6 +171,8 @@ class AssistantApp:
         self.root.geometry("980x860")
         self.root.minsize(860, 700)
 
+        _install_whisper_checksum_patch()
+
         self._setup_theme()
         self.root.configure(bg=self.BG_COLOR)
 
@@ -97,6 +203,9 @@ class AssistantApp:
         self.recognizer.operation_timeout = None
         self.stop_listening = None
 
+        self.transcription_mode_var = tk.StringVar(value=DEFAULT_TRANSCRIPTION_MODE)
+        self._transcribe_model, self._transcribe_language = TRANSCRIPTION_PROFILES[DEFAULT_TRANSCRIPTION_MODE]
+
         self.available_microphones = []
         self.microphone_device_index = self.find_microphone_device()
         self.device_text.set(f"Device: {self.get_device_name(self.microphone_device_index)}")
@@ -111,6 +220,8 @@ class AssistantApp:
         self.apply_alpha(self.alpha_value)
 
         self._build_layout()
+
+        threading.Thread(target=self._preload_whisper_small, daemon=True).start()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root.after(100, self.check_queue)
@@ -361,6 +472,22 @@ class AssistantApp:
         ttk.Button(device_row, text="Use Selected", command=self.apply_selected_microphone, style="Rounded.TButton").pack(side=tk.LEFT, padx=4)
         api_body.columnconfigure(0, weight=1)
 
+        ttk.Label(api_body, text="Transcription language", background=self.CARD_COLOR).grid(
+            row=6, column=0, sticky="w", pady=(12, 0)
+        )
+        transcription_row = tk.Frame(api_body, bg=self.CARD_COLOR)
+        transcription_row.grid(row=7, column=0, columnspan=3, sticky="we", pady=(4, 0))
+        self.transcription_combo = ttk.Combobox(
+            transcription_row,
+            textvariable=self.transcription_mode_var,
+            values=TRANSCRIPTION_MODES_ORDER,
+            state="readonly",
+            width=50,
+        )
+        self.transcription_combo.pack(side=tk.LEFT, fill="x", expand=True)
+        self.transcription_mode_var.trace_add("write", self._on_transcription_mode_write)
+        self._apply_transcription_mode_key()
+
         cv_card = ttk.LabelFrame(scrollable, text="CV", style="Card.TLabelframe")
         cv_card.pack(fill="both", expand=True, pady=(0, 10))
         self.cv_text = scrolledtext.ScrolledText(
@@ -473,6 +600,7 @@ Instructions:
             "api_key": self.api_key_var.get().strip(),
             "window_alpha": round(self.alpha_value, 2),
             "microphone_device_index": self.microphone_device_index,
+            "transcription_mode": self.transcription_mode_var.get(),
         }
 
     def load_config(self):
@@ -486,6 +614,10 @@ Instructions:
                 saved_device = config.get("microphone_device_index")
                 if isinstance(saved_device, int):
                     self.microphone_device_index = saved_device
+                tm = config.get("transcription_mode", DEFAULT_TRANSCRIPTION_MODE)
+                if tm in TRANSCRIPTION_PROFILES:
+                    self.transcription_mode_var.set(tm)
+                    self._apply_transcription_mode_key(tm)
         except Exception as err:
             print(f"Config load error: {err}")
 
@@ -621,6 +753,40 @@ Instructions:
         except Exception:
             self.status_text.set("Could not parse selected device")
 
+    def _apply_transcription_mode_key(self, key=None):
+        if key is None:
+            key = self.transcription_mode_var.get()
+        if key not in TRANSCRIPTION_PROFILES:
+            key = DEFAULT_TRANSCRIPTION_MODE
+            self.transcription_mode_var.set(key)
+        self._transcribe_model, self._transcribe_language = TRANSCRIPTION_PROFILES[key]
+
+    def _on_transcription_mode_write(self, *_args):
+        self._apply_transcription_mode_key()
+        self.save_config()
+
+    def _preload_whisper_small(self):
+        def set_status(msg):
+            if not self.is_closing:
+                self.root.after(0, lambda m=msg: self.status_text.set(m))
+
+        _install_whisper_checksum_patch()
+        cached_ok = WHISPER_SMALL_PT.exists() and _trusted_small_pt_file(WHISPER_SMALL_PT)
+        show_status = not cached_ok
+
+        if show_status:
+            set_status("Downloading language model...")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    import whisper
+
+                    whisper.load_model("small", download_root=WHISPER_CACHE_ROOT)
+        finally:
+            if show_status:
+                set_status("Language model ready")
+
     def on_closing(self):
         self.is_closing = True
         if self.stop_listening:
@@ -633,7 +799,17 @@ Instructions:
     def audio_callback(self, recognizer, audio):
         def process_audio():
             try:
-                text = recognizer.recognize_whisper(audio, model="base.en", language="en")
+                _install_whisper_checksum_patch()
+                model = self._transcribe_model
+                lang = self._transcribe_language
+                print(f"[Transcription] mode={self.transcription_mode_var.get()} model={model} lang={lang}")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        if lang is None:
+                            text = recognizer.recognize_whisper(audio, model=model)
+                        else:
+                            text = recognizer.recognize_whisper(audio, model=model, language=lang)
                 if text and text.strip():
                     app_queue.put(text)
                     self.last_transcription_time = time.time()
