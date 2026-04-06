@@ -1,0 +1,79 @@
+{
+  "name": "interview-assistant",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "AI-powered real-time interview copilot",
+  "author": "msc35",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "vite build && electron-builder --mac && bash build/create-dmg.sh",
+    "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.interviewassistant.app",
+    "productName": "Interview Assistant",
+    "copyright": "Copyright © 2025",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] }
+      ],
+      "icon": "public/icon.icns",
+      "darkModeSupport": true,
+      "entitlementsInherit": "entitlements.plist",
+      "entitlements": "entitlements.plist"
+    },
+    "dmg": {
+      "title": "Interview Assistant ${version}",
+      "window": { "width": 600, "height": 420 },
+      "backgroundColor": "#0a0a0a",
+      "contents": [
+        { "x": 180, "y": 220, "type": "file" },
+        { "x": 420, "y": 220, "type": "link", "path": "/Applications" },
+        { "x": 180, "y": 380, "type": "file", "path": "build/Install.command" }
+      ]
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": ["**/*.py"]
+      }
+    ]
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.7.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^24.12.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.2.1",
+    "electron": "^41.1.1",
+    "electron-builder": "^26.8.1",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.4.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.58.0",
+    "vite": "^8.0.4",
+    "wait-on": "^9.0.4"
+  }
+}
