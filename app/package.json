@@ -13,10 +13,19 @@
     "electron:build": "vite build && electron-builder --mac --publish never && bash build/create-dmg.sh",
     "preview": "vite preview"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cakirataberk/interview-assistant.git"
+  },
   "build": {
     "appId": "com.interviewassistant.app",
     "productName": "Interview Assistant",
     "copyright": "Copyright © 2025",
+    "publish": {
+      "provider": "github",
+      "owner": "cakirataberk",
+      "repo": "interview-assistant"
+    },
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
