@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vite build && electron-builder --mac && bash build/create-dmg.sh",
+    "electron:build": "vite build && electron-builder --mac --publish never && bash build/create-dmg.sh",
     "preview": "vite preview"
   },
   "build": {
