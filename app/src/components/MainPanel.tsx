@@ -24,8 +24,12 @@ export function MainPanel({ config }: Props) {
 
   useBackendWS({
     onTranscription: useCallback((text: string) => {
-      setQuestion((prev) => prev ? `${prev}\n${text}` : text)
+      setQuestion((prev) => prev ? `${prev} ${text}` : text)
       setStatusMsg('Transcribed')
+    }, []),
+    onPartial: useCallback((text: string) => {
+      setQuestion((prev) => prev ? `${prev} ${text}` : text)
+      setStatusMsg('Listening…')
     }, []),
     onStatus: useCallback((text: string) => {
       setStatusMsg(text)

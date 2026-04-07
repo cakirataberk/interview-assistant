@@ -21,6 +21,7 @@ from audio import (
     list_microphone_devices,
     preload_whisper_small,
     transcribe_audio,
+    transcribe_pcm,
 )
 from config import load_config, save_config
 
@@ -52,17 +53,21 @@ app.add_middleware(
 _ws_clients: list[WebSocket] = []
 _ws_lock = threading.Lock()
 
-_recognizer = sr.Recognizer()
-_recognizer.pause_threshold = 0.8
-_recognizer.dynamic_energy_threshold = False
-_recognizer.energy_threshold = 300
-
-_stop_listening = None
+_stop_event: Optional[threading.Event] = None
+_stream_thread: Optional[threading.Thread] = None
 _listening_lock = threading.Lock()
 
-_transcription_queue: queue.Queue = queue.Queue()
 _current_mode = "TR + ENG (Mixed)"
 _current_device_index = 0
+
+# ── Streaming constants ────────────────────────────────────────────────────────
+SAMPLE_RATE   = 16000
+CHUNK_FRAMES  = 512                                   # ~32 ms per chunk
+ENERGY_THRESH = 300                                   # RMS silence threshold
+# after this many speech chunks, fire a partial transcription
+PARTIAL_CHUNKS = int(1.5 * SAMPLE_RATE / CHUNK_FRAMES)   # ~1.5 s
+# this many silent chunks = end of phrase
+SILENCE_END_CHUNKS = int(0.55 * SAMPLE_RATE / CHUNK_FRAMES)  # ~0.55 s
 
 _is_recording = False
 _recording_thread: Optional[threading.Thread] = None
@@ -111,35 +116,95 @@ def _broadcast_sync(payload: dict) -> None:
                 _ws_clients.remove(ws)
 
 
-# ── Transcription worker ───────────────────────────────────────────────────────
+# ── Streaming audio worker ────────────────────────────────────────────────────
 
-def _transcription_worker():
-    while True:
-        item = _transcription_queue.get()
-        if item is None:
-            break
-        audio, model_name, lang = item
+def _do_transcribe(pcm: bytes, model_name: str, lang, is_final: bool):
+    """Run in a thread — transcribe PCM and broadcast result."""
+    try:
+        text = transcribe_pcm(pcm, SAMPLE_RATE, model_name, lang)
+        if text.strip():
+            msg_type = "transcription" if is_final else "partial"
+            _broadcast_sync({"type": msg_type, "text": text})
+        elif is_final:
+            _broadcast_sync({"type": "status", "text": "silence"})
+    except Exception as err:
+        _broadcast_sync({"type": "status", "text": f"transcription error: {err}"})
+
+
+def _stream_worker(device_index: int, mode: str, stop_evt: threading.Event):
+    import pyaudio, numpy as np
+
+    model_name, lang = TRANSCRIPTION_PROFILES.get(mode, TRANSCRIPTION_PROFILES["TR + ENG (Mixed)"])
+
+    pa = pyaudio.PyAudio()
+    try:
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=SAMPLE_RATE,
+            input=True,
+            input_device_index=device_index,
+            frames_per_buffer=CHUNK_FRAMES,
+        )
+    except Exception as err:
+        _broadcast_sync({"type": "status", "text": f"audio open error: {err}"})
+        pa.terminate()
+        return
+
+    speech_buf: list[bytes] = []   # full current phrase
+    window_buf: list[bytes] = []   # rolling partial window
+    silence_count = 0
+    speaking = False
+
+    print(f"[stream] started device={device_index} mode={mode}", flush=True)
+
+    while not stop_evt.is_set():
         try:
-            text = transcribe_audio(audio, model_name, lang)
-            if text.strip():
-                _broadcast_sync({"type": "transcription", "text": text})
-            else:
-                _broadcast_sync({"type": "status", "text": "silence"})
-        except Exception as err:
-            _broadcast_sync({"type": "status", "text": f"transcription error: {err}"})
+            raw = stream.read(CHUNK_FRAMES, exception_on_overflow=False)
+        except Exception:
+            break
 
+        chunk = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+        energy = float(np.sqrt(np.mean(chunk ** 2)))
 
-threading.Thread(target=_transcription_worker, daemon=True).start()
+        if energy > ENERGY_THRESH:
+            silence_count = 0
+            speaking = True
+            speech_buf.append(raw)
+            window_buf.append(raw)
 
+            # Partial transcription every PARTIAL_CHUNKS chunks
+            if len(window_buf) >= PARTIAL_CHUNKS:
+                pcm = b"".join(window_buf)
+                window_buf = []
+                _broadcast_sync({"type": "status", "text": "transcribing…"})
+                threading.Thread(
+                    target=_do_transcribe,
+                    args=(pcm, model_name, lang, False),
+                    daemon=True,
+                ).start()
+        else:
+            if speaking:
+                silence_count += 1
+                speech_buf.append(raw)
+                if silence_count >= SILENCE_END_CHUNKS:
+                    # End of phrase — transcribe full buffer as final
+                    pcm = b"".join(speech_buf)
+                    speech_buf = []
+                    window_buf = []
+                    silence_count = 0
+                    speaking = False
+                    _broadcast_sync({"type": "status", "text": "transcribing…"})
+                    threading.Thread(
+                        target=_do_transcribe,
+                        args=(pcm, model_name, lang, True),
+                        daemon=True,
+                    ).start()
 
-def _audio_callback(recognizer, audio):
-    print(f"[audio] callback fired, {len(audio.frame_data)} bytes, threshold={recognizer.energy_threshold:.0f}", flush=True)
-    mode = _current_mode
-    if mode not in TRANSCRIPTION_PROFILES:
-        mode = "TR + ENG (Mixed)"
-    model_name, lang = TRANSCRIPTION_PROFILES[mode]
-    _transcription_queue.put((audio, model_name, lang))
-    _broadcast_sync({"type": "status", "text": "transcribing…"})
+    stream.stop_stream()
+    stream.close()
+    pa.terminate()
+    print("[stream] stopped", flush=True)
 
 
 # ── HTTP endpoints ─────────────────────────────────────────────────────────────
@@ -227,7 +292,7 @@ def clear_history():
 
 @app.post("/listen/start")
 def start_listening(body: dict):
-    global _stop_listening, _current_mode, _current_device_index
+    global _stop_event, _stream_thread, _current_mode, _current_device_index
 
     device_index = int(body.get("device_index", 0))
     mode = body.get("transcription_mode", "TR + ENG (Mixed)")
@@ -235,34 +300,29 @@ def start_listening(body: dict):
     _current_device_index = device_index
 
     with _listening_lock:
-        if _stop_listening is not None:
-            _stop_listening(wait_for_stop=False)
-            _stop_listening = None
-        try:
-            # Calibrate ambient noise (best-effort — skip on output-only devices)
-            try:
-                cal_src = sr.Microphone(device_index=device_index)
-                with cal_src as s:
-                    if s is not None:
-                        _recognizer.adjust_for_ambient_noise(s, duration=0.5)
-                        _recognizer.energy_threshold = max(150, int(_recognizer.energy_threshold * 0.7))
-            except Exception:
-                pass  # Calibration failed — proceed with default energy threshold
+        # Stop existing stream if running
+        if _stop_event is not None:
+            _stop_event.set()
+            if _stream_thread and _stream_thread.is_alive():
+                _stream_thread.join(timeout=2)
 
-            mic = sr.Microphone(device_index=device_index)
-            _stop_listening = _recognizer.listen_in_background(mic, _audio_callback, phrase_time_limit=20)
-            return {"ok": True}
-        except Exception as err:
-            return {"error": str(err)}
+        _stop_event = threading.Event()
+        _stream_thread = threading.Thread(
+            target=_stream_worker,
+            args=(device_index, mode, _stop_event),
+            daemon=True,
+        )
+        _stream_thread.start()
+    return {"ok": True}
 
 
 @app.post("/listen/stop")
 def stop_listening():
-    global _stop_listening
+    global _stop_event
     with _listening_lock:
-        if _stop_listening:
-            _stop_listening(wait_for_stop=False)
-            _stop_listening = None
+        if _stop_event is not None:
+            _stop_event.set()
+            _stop_event = None
     return {"ok": True}
 
 

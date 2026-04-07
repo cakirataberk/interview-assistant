@@ -2,11 +2,13 @@ import { useEffect, useRef, useCallback } from 'react'
 
 type WSMessage =
   | { type: 'transcription'; text: string }
+  | { type: 'partial'; text: string }
   | { type: 'status'; text: string }
   | { type: 'pong' }
 
 type Handlers = {
   onTranscription?: (text: string) => void
+  onPartial?: (text: string) => void
   onStatus?: (text: string) => void
 }
 
@@ -26,6 +28,8 @@ export function useBackendWS(handlers: Handlers) {
         const msg: WSMessage = JSON.parse(event.data)
         if (msg.type === 'transcription') {
           handlersRef.current.onTranscription?.(msg.text)
+        } else if (msg.type === 'partial') {
+          handlersRef.current.onPartial?.(msg.text)
         } else if (msg.type === 'status') {
           handlersRef.current.onStatus?.(msg.text)
         }

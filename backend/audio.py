@@ -126,6 +126,31 @@ def transcribe_bytes(audio_bytes: bytes, model_name: str, language: Optional[str
     return (result.get("text") or "").strip()
 
 
+def transcribe_pcm(pcm_bytes: bytes, sample_rate: int, model_name: str, language: Optional[str]) -> str:
+    """Transcribe raw PCM int16 bytes directly (no SpeechRecognition wrapper needed)."""
+    import soundfile as sf
+    import torch
+    import numpy as np
+
+    model = get_cached_whisper_model(model_name)
+    audio_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    if sample_rate != 16000:
+        # simple resample via soundfile round-trip
+        buf = io.BytesIO()
+        sf.write(buf, audio_array, sample_rate, format="WAV", subtype="FLOAT")
+        buf.seek(0)
+        audio_array, _ = sf.read(buf)
+        audio_array = audio_array.astype(np.float32)
+    kwargs = {"fp16": torch.cuda.is_available()}
+    if language is not None:
+        kwargs["language"] = language
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = model.transcribe(audio_array, **kwargs)
+    return (result.get("text") or "").strip()
+
+
 def transcribe_audio(audio_data: sr.AudioData, model_name: str, language: Optional[str]) -> str:
     import soundfile as sf
     import torch
