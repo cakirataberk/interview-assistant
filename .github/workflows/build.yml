@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-mac:
     runs-on: macos-14   # Apple Silicon runner
@@ -30,7 +33,7 @@ jobs:
         run: npm run electron:build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: false   # Skip code signing for now
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload .dmg artifact
         uses: actions/upload-artifact@v4
@@ -44,6 +47,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: app/dist/*.dmg
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
