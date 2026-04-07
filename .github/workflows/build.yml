@@ -30,7 +30,7 @@ jobs:
 
       - name: Build React + Electron
         working-directory: app
-        run: npm run electron:build
+        run: vite build && electron-builder --mac --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
