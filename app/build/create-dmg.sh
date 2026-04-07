@@ -12,7 +12,6 @@ WORK_DIR="/tmp/ia_dmg_work"
 
 echo "→ Stripping quarantine from .app..."
 xattr -cr "$APP_PATH"
-codesign --force --deep --sign - "$APP_PATH" 2>/dev/null || true
 
 echo "→ Preparing DMG working folder..."
 rm -rf "$WORK_DIR"
@@ -34,19 +33,23 @@ cat > "$WORK_DIR/README.txt" << 'EOF'
 How to install Interview Assistant
 ====================================
 
-1. Drag "Interview Assistant.app" to the "Applications" folder.
+OPTION A — Easy install (recommended):
+  1. Double-click "Install.command" in this window.
+     → If macOS says it can't be opened: right-click it → Open → Open
+  2. The app will be copied to Applications and launch automatically.
 
-2. Open the app:
-   • Double-click it from Applications.
-   • If you see "app can't be opened", right-click → Open, then click Open.
-   • If that still fails, double-click "Install.command" in this window
-     (right-click → Open if macOS blocks it too).
+OPTION B — Manual install:
+  1. Drag "Interview Assistant.app" to the "Applications" folder.
+  2. Right-click the app in Applications → Open → Open
+     (This is required the very first time for apps not from the App Store.)
 
-3. On first launch the app will set up its Python environment (~1 min).
+On first launch the app will set up its Python environment (~1 min).
 
-Need help? The terminal command that always works:
-  xattr -cr "/Applications/Interview Assistant.app" && open "/Applications/Interview Assistant.app"
-
+────────────────────────────────────────
+STILL BLOCKED? Run this in Terminal:
+  xattr -cr "/Applications/Interview Assistant.app"
+  open "/Applications/Interview Assistant.app"
+────────────────────────────────────────
 EOF
 
 echo "→ Creating DMG..."

@@ -4,12 +4,18 @@ type WSMessage =
   | { type: 'transcription'; text: string }
   | { type: 'partial'; text: string }
   | { type: 'status'; text: string }
+  | { type: 'suggestion_chunk'; text: string }
+  | { type: 'suggestion_done'; history_count: number }
+  | { type: 'suggestion_error'; text: string }
   | { type: 'pong' }
 
 type Handlers = {
   onTranscription?: (text: string) => void
   onPartial?: (text: string) => void
   onStatus?: (text: string) => void
+  onSuggestionChunk?: (text: string) => void
+  onSuggestionDone?: (historyCount: number) => void
+  onSuggestionError?: (text: string) => void
 }
 
 export function useBackendWS(handlers: Handlers) {
@@ -32,6 +38,12 @@ export function useBackendWS(handlers: Handlers) {
           handlersRef.current.onPartial?.(msg.text)
         } else if (msg.type === 'status') {
           handlersRef.current.onStatus?.(msg.text)
+        } else if (msg.type === 'suggestion_chunk') {
+          handlersRef.current.onSuggestionChunk?.(msg.text)
+        } else if (msg.type === 'suggestion_done') {
+          handlersRef.current.onSuggestionDone?.(msg.history_count)
+        } else if (msg.type === 'suggestion_error') {
+          handlersRef.current.onSuggestionError?.(msg.text)
         }
       } catch {
         // ignore
@@ -47,6 +59,13 @@ export function useBackendWS(handlers: Handlers) {
     }
   }, [])
 
+  const sendSuggest = useCallback((params: Record<string, unknown>) => {
+    const ws = wsRef.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ cmd: 'suggest', ...params }))
+    }
+  }, [])
+
   useEffect(() => {
     const timer = setTimeout(connect, 500)
     return () => {
@@ -54,4 +73,6 @@ export function useBackendWS(handlers: Handlers) {
       wsRef.current?.close()
     }
   }, [connect])
+
+  return { sendSuggest }
 }

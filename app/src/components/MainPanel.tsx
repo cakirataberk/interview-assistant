@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Mic, MicOff, Sparkles, Trash2, RotateCcw, Circle, MonitorPlay, MonitorOff } from 'lucide-react'
 import type { AppConfig } from '../App'
-import { startListening, stopListening, getSuggestion, clearHistory, startRecording, stopRecording } from '../lib/api'
+import { startListening, stopListening, clearHistory, startRecording, stopRecording } from '../lib/api'
 import { useBackendWS } from '../hooks/useBackendWS'
 import { TeleprompterOverlay } from './TeleprompterOverlay'
 
@@ -22,7 +22,7 @@ export function MainPanel({ config }: Props) {
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const electron = (window as any).electronAPI
 
-  useBackendWS({
+  const { sendSuggest } = useBackendWS({
     onTranscription: useCallback((text: string) => {
       setQuestion((prev) => prev ? `${prev} ${text}` : text)
       setStatusMsg('Transcribed')
@@ -33,6 +33,19 @@ export function MainPanel({ config }: Props) {
     }, []),
     onStatus: useCallback((text: string) => {
       setStatusMsg(text)
+    }, []),
+    onSuggestionChunk: useCallback((text: string) => {
+      setSuggestion((prev) => prev + text)
+    }, []),
+    onSuggestionDone: useCallback((count: number) => {
+      setHistoryCount(count)
+      setStatusMsg('AI response ready')
+      setIsFetchingSuggestion(false)
+    }, []),
+    onSuggestionError: useCallback((text: string) => {
+      setSuggestion(`Error: ${text}`)
+      setStatusMsg('Error')
+      setIsFetchingSuggestion(false)
     }, []),
   })
 
@@ -84,7 +97,7 @@ export function MainPanel({ config }: Props) {
     }
   }
 
-  async function fetchSuggestion() {
+  function fetchSuggestion() {
     if (!question.trim()) return
     if (!config.api_key) {
       setStatusMsg('No API key — go to Setup')
@@ -93,7 +106,7 @@ export function MainPanel({ config }: Props) {
     setIsFetchingSuggestion(true)
     setSuggestion('')
     setStatusMsg('Asking AI…')
-    const res = await getSuggestion({
+    sendSuggest({
       question: question.trim(),
       api_key: config.api_key,
       cv: config.cv,
@@ -101,14 +114,6 @@ export function MainPanel({ config }: Props) {
       system_prompt: config.system_prompt,
       user_prompt: config.user_prompt,
     })
-    if (res.error) {
-      setSuggestion(`Error: ${res.error}`)
-    } else {
-      setSuggestion(res.suggestion)
-      setHistoryCount(res.history_count)
-    }
-    setStatusMsg('AI response ready')
-    setIsFetchingSuggestion(false)
   }
 
   async function handleClearHistory() {

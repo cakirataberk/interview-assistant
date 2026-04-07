@@ -10,11 +10,8 @@ fi
 # Copy app
 cp -R "$(dirname "$0")/Interview Assistant.app" /Applications/
 
-# Remove quarantine
+# Remove quarantine so the app opens without any security warning
 xattr -cr "$APP"
-
-# Sign
-codesign --force --deep --sign - "$APP" 2>/dev/null
 
 echo ""
 echo "Done! Opening Interview Assistant..."

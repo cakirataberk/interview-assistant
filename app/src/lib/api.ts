@@ -33,20 +33,52 @@ export async function stopListening() {
   return r.json()
 }
 
-export async function getSuggestion(params: {
-  question: string
-  api_key: string
-  cv: string
-  job_description: string
-  system_prompt: string
-  user_prompt: string
-}) {
-  const r = await fetch(`${BASE}/suggest`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  })
-  return r.json()
+export async function streamSuggestion(
+  params: {
+    question: string
+    api_key: string
+    cv: string
+    job_description: string
+    system_prompt: string
+    user_prompt: string
+  },
+  onChunk: (text: string) => void,
+  onDone: (historyCount: number) => void,
+  onError: (msg: string) => void,
+) {
+  let response: Response
+  try {
+    response = await fetch(`${BASE}/suggest/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    })
+  } catch {
+    onError('Backend unreachable')
+    return
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) { onError('No stream'); return }
+  const decoder = new TextDecoder()
+  let buf = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      try {
+        const data = JSON.parse(line.slice(6))
+        if (data.text) onChunk(data.text)
+        if (data.done) onDone(data.history_count ?? 0)
+        if (data.error) onError(data.error)
+      } catch { /* partial line */ }
+    }
+  }
 }
 
 export async function clearHistory() {

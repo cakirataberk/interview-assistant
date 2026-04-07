@@ -9,6 +9,46 @@ MODELS_TO_TRY = [
 ]
 
 
+def stream_ai_suggestion(
+    user_question: str,
+    system_prompt: str,
+    api_key: str,
+    conversation_history: list[tuple[str, str]] | None = None,
+):
+    """Yields text chunks as Gemini streams them."""
+    try:
+        client = genai.Client(api_key=api_key)
+
+        if conversation_history:
+            history_text = "\n\n--- Previous Conversation ---\n"
+            for i, (q_text, a_text) in enumerate(conversation_history[-5:], 1):
+                history_text += f"\nQ{i}: {q_text}\nA{i}: {a_text}\n"
+            history_text += "\n--- Current Question ---\n"
+            full_question = history_text + user_question
+        else:
+            full_question = user_question
+
+        last_err = None
+        for model_name in MODELS_TO_TRY:
+            try:
+                for chunk in client.models.generate_content_stream(
+                    model=model_name,
+                    contents=full_question,
+                    config=types.GenerateContentConfig(system_instruction=system_prompt),
+                ):
+                    if chunk.text:
+                        yield chunk.text
+                return
+            except Exception as e:
+                print(f"[AI] {model_name} failed: {e}", flush=True)
+                last_err = e
+                continue
+
+        yield f"AI error: {last_err}"
+    except Exception as err:
+        yield f"AI error: {err}"
+
+
 def get_ai_suggestion(
     user_question: str,
     system_prompt: str,

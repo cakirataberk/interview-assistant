@@ -33,8 +33,7 @@
       ],
       "icon": "public/icon.icns",
       "darkModeSupport": true,
-      "entitlementsInherit": "entitlements.plist",
-      "entitlements": "entitlements.plist"
+      "identity": null
     },
     "dmg": {
       "title": "Interview Assistant ${version}",

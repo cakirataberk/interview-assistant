@@ -14,8 +14,9 @@ venv/
 env/
 
 # Build / packaging artifacts
-build/
+# Note: app/build/ contains installer scripts and IS tracked
 dist/
+app/dist/
 *.spec.bak
 *.egg-info/
 

@@ -12,9 +12,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import speech_recognition as sr
+import asyncio
+import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from audio import (
     TRANSCRIPTION_PROFILES,
@@ -284,6 +286,73 @@ def suggest(body: dict):
     return {"suggestion": result, "history_count": len(_conversation_history)}
 
 
+@app.post("/suggest/stream")
+async def suggest_stream(body: dict):
+    from google import genai as _genai
+    from google.genai import types as _types
+    from ai import MODELS_TO_TRY
+
+    question: str = body.get("question", "").strip()
+    api_key: str = body.get("api_key", "").strip()
+    cv: str = body.get("cv", "")
+    jd: str = body.get("job_description", "")
+    system_prompt_template: str = body.get("system_prompt", "")
+    user_prompt_template: str = body.get("user_prompt", '"{transcribed_text}"')
+    use_history: bool = body.get("use_history", True)
+
+    if not question:
+        return {"error": "question is empty"}
+    if not api_key:
+        return {"error": "api_key is required"}
+
+    try:
+        final_system = system_prompt_template.format(cv=cv, job_description=jd)
+        final_user = user_prompt_template.format(transcribed_text=question)
+    except KeyError as e:
+        return {"error": f"Template placeholder missing: {e}"}
+
+    if use_history and _conversation_history:
+        history_text = "\n\n--- Previous Conversation ---\n"
+        for i, (q_text, a_text) in enumerate(_conversation_history[-5:], 1):
+            history_text += f"\nQ{i}: {q_text}\nA{i}: {a_text}\n"
+        history_text += "\n--- Current Question ---\n"
+        final_user = history_text + final_user
+
+    async def generate():
+        client = _genai.Client(api_key=api_key)
+        full_chunks: list[str] = []
+        last_err = None
+        for model_name in MODELS_TO_TRY:
+            try:
+                async for chunk in await client.aio.models.generate_content_stream(
+                    model=model_name,
+                    contents=final_user,
+                    config=_types.GenerateContentConfig(system_instruction=final_system),
+                ):
+                    if chunk.text:
+                        full_chunks.append(chunk.text)
+                        yield f"data: {json.dumps({'text': chunk.text})}\n\n"
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        else:
+            yield f"data: {json.dumps({'text': f'AI error: {last_err}'})}\n\n"
+
+        full_text = "".join(full_chunks)
+        if full_text:
+            _conversation_history.append((question, full_text))
+            if len(_conversation_history) > _max_history:
+                _conversation_history.pop(0)
+        yield f"data: {json.dumps({'done': True, 'history_count': len(_conversation_history)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/history/clear")
 def clear_history():
     _conversation_history.clear()
@@ -420,12 +489,55 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             if data.get("cmd") == "ping":
                 await websocket.send_json({"type": "pong"})
+            elif data.get("cmd") == "suggest":
+                await _ws_suggest(websocket, data)
     except WebSocketDisconnect:
         pass
     finally:
         with _ws_lock:
             if websocket in _ws_clients:
                 _ws_clients.remove(websocket)
+
+
+async def _ws_suggest(websocket: WebSocket, body: dict):
+    from ai import get_ai_suggestion
+
+    question: str = body.get("question", "").strip()
+    api_key: str = body.get("api_key", "").strip()
+    cv: str = body.get("cv", "")
+    jd: str = body.get("job_description", "")
+    system_prompt_template: str = body.get("system_prompt", "")
+    user_prompt_template: str = body.get("user_prompt", '"{transcribed_text}"')
+    use_history: bool = body.get("use_history", True)
+
+    if not question or not api_key:
+        await websocket.send_json({"type": "suggestion_error", "text": "missing question or api_key"})
+        return
+
+    try:
+        final_system = system_prompt_template.format(cv=cv, job_description=jd)
+        final_user = user_prompt_template.format(transcribed_text=question)
+    except KeyError as e:
+        await websocket.send_json({"type": "suggestion_error", "text": f"template error: {e}"})
+        return
+
+    history = _conversation_history if use_history else None
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, get_ai_suggestion, final_user, final_system, api_key, history
+    )
+
+    if result.startswith("AI error:"):
+        await websocket.send_json({"type": "suggestion_error", "text": result})
+        return
+
+    _conversation_history.append((question, result))
+    if len(_conversation_history) > _max_history:
+        _conversation_history.pop(0)
+
+    await websocket.send_json({"type": "suggestion_chunk", "text": result})
+    await websocket.send_json({"type": "suggestion_done", "history_count": len(_conversation_history)})
 
 
 
