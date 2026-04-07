@@ -28,12 +28,18 @@ jobs:
         working-directory: app
         run: npm ci
 
-      - name: Build React + Electron
+      - name: Build React + Electron + DMG
         working-directory: app
-        run: npx vite build && npx electron-builder --mac --publish never
+        run: npx vite build && npx electron-builder --mac --publish never && bash build/create-dmg.sh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Rename DMG with tag version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          mv "app/dist/Interview Assistant-1.0.0-arm64.dmg" "app/dist/Interview-Assistant-${TAG}-arm64.dmg"
 
       - name: Upload .dmg artifact
         uses: actions/upload-artifact@v4
@@ -46,6 +52,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: app/dist/*.dmg
+          files: app/dist/Interview-Assistant-*.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
