@@ -38,6 +38,32 @@ export function MainPanel({ config }: Props) {
     }
   }, [])
 
+  // Global keyboard shortcuts
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      const meta = e.metaKey || e.ctrlKey
+      // ⌘L → toggle listening
+      if (meta && !e.shiftKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault()
+        toggleListening()
+      }
+      // ⌘⌫ → clear
+      if (meta && e.key === 'Backspace') {
+        e.preventDefault()
+        setQuestion('')
+        setSuggestion('')
+        setStatusMsg('Cleared')
+      }
+      // ⌘↵ → get suggestion (global, not just textarea)
+      if (meta && e.key === 'Enter') {
+        e.preventDefault()
+        fetchSuggestion()
+      }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [isListening, question, config])
+
   async function toggleListening() {
     if (isListening) {
       await stopListening()
@@ -174,11 +200,11 @@ export function MainPanel({ config }: Props) {
       <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
         <Btn onClick={toggleListening} active={isListening} activeColor="#10b981"
           icon={isListening ? <MicOff size={14} /> : <Mic size={14} />}
-          label={isListening ? 'Stop Listening' : 'Start Listening'} />
+          label={isListening ? 'Stop Listening' : 'Start Listening'} shortcut="⌘L" />
         <Btn onClick={fetchSuggestion} disabled={isFetchingSuggestion || !question.trim()}
-          icon={<Sparkles size={14} />} label="Suggest (⌘↵)" accent />
+          icon={<Sparkles size={14} />} label="Suggest" shortcut="⌘↵" accent />
         <Btn onClick={() => { setQuestion(''); setSuggestion(''); setStatusMsg('Cleared') }}
-          icon={<Trash2 size={14} />} label="Clear" />
+          icon={<Trash2 size={14} />} label="Clear" shortcut="⌘⌫" />
         <Btn onClick={handleClearHistory} icon={<RotateCcw size={14} />} label="Clear History" />
         <Btn onClick={toggleRecording} active={isRecording} activeColor="#ef4444"
           icon={<Circle size={14} fill={isRecording ? '#ef4444' : 'none'} />}
@@ -196,12 +222,6 @@ export function MainPanel({ config }: Props) {
         <textarea
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-              e.preventDefault()
-              fetchSuggestion()
-            }
-          }}
           placeholder="Question will appear here as you speak, or type directly…"
           style={{
             flex: 1, padding: '12px 14px', background: 'transparent', border: 'none', outline: 'none',
@@ -215,8 +235,8 @@ export function MainPanel({ config }: Props) {
   )
 }
 
-function Btn({ onClick, icon, label, active, activeColor, accent, disabled }: {
-  onClick: () => void; icon: React.ReactNode; label: string
+function Btn({ onClick, icon, label, shortcut, active, activeColor, accent, disabled }: {
+  onClick: () => void; icon: React.ReactNode; label: string; shortcut?: string
   active?: boolean; activeColor?: string; accent?: boolean; disabled?: boolean
 }) {
   const bg = active ? `${activeColor}22` : accent ? '#6366f1' : '#161616'
@@ -231,6 +251,17 @@ function Btn({ onClick, icon, label, active, activeColor, accent, disabled }: {
       transition: 'all 0.12s', flexShrink: 0, whiteSpace: 'nowrap',
     }}>
       {icon}{label}
+      {shortcut && (
+        <span style={{
+          marginLeft: 4, fontSize: 10, fontWeight: 500,
+          color: disabled ? '#2a2a2a' : active ? activeColor : accent ? 'rgba(255,255,255,0.6)' : '#444',
+          background: disabled ? 'transparent' : '#0d0d0d',
+          border: `1px solid ${disabled ? 'transparent' : '#222'}`,
+          borderRadius: 4, padding: '1px 5px', letterSpacing: '0.02em',
+        }}>
+          {shortcut}
+        </span>
+      )}
     </button>
   )
 }
