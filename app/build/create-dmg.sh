@@ -10,8 +10,8 @@ DMG_OUT="$DIST/$APP_NAME-$VERSION-arm64.dmg"
 TMP_DMG="/tmp/ia_tmp.dmg"
 WORK_DIR="/tmp/ia_dmg_work"
 
-echo "→ Stripping quarantine from .app..."
-xattr -cr "$APP_PATH"
+echo "→ Ad-hoc signing .app (enables 'Open Anyway' on recipient machines)..."
+codesign --force --deep --sign - "$APP_PATH"
 
 echo "→ Preparing DMG working folder..."
 rm -rf "$WORK_DIR"
@@ -33,23 +33,16 @@ cat > "$WORK_DIR/README.txt" << 'EOF'
 How to install Interview Assistant
 ====================================
 
-OPTION A — Easy install (recommended):
-  1. Double-click "Install.command" in this window.
-     → If macOS says it can't be opened: right-click it → Open → Open
-  2. The app will be copied to Applications and launch automatically.
+1. Drag "Interview Assistant.app" to the "Applications" folder.
+2. Open the app. macOS will say it "cannot be verified".
+3. Go to System Settings → Privacy & Security.
+4. Scroll down — you will see "Interview Assistant was blocked".
+5. Click "Open Anyway" and confirm.
 
-OPTION B — Manual install:
-  1. Drag "Interview Assistant.app" to the "Applications" folder.
-  2. Right-click the app in Applications → Open → Open
-     (This is required the very first time for apps not from the App Store.)
+The app will work normally after this one-time step.
 
 On first launch the app will set up its Python environment (~1 min).
-
-────────────────────────────────────────
-STILL BLOCKED? Run this in Terminal:
-  xattr -cr "/Applications/Interview Assistant.app"
-  open "/Applications/Interview Assistant.app"
-────────────────────────────────────────
+Requires: brew install python@3.11 portaudio
 EOF
 
 echo "→ Creating DMG..."

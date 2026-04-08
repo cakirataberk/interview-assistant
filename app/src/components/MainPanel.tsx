@@ -198,7 +198,7 @@ export function MainPanel({ config }: Props) {
           fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif',
           whiteSpace: 'pre-wrap',
         }}>
-          {isFetchingSuggestion
+          {isFetchingSuggestion && !suggestion
             ? <span style={{ color: '#555' }}>Thinking…</span>
             : suggestion || <span>Suggestion will appear here…</span>
           }

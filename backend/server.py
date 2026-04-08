@@ -500,7 +500,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def _ws_suggest(websocket: WebSocket, body: dict):
-    from ai import get_ai_suggestion
+    from ai import async_stream_ai_suggestion
 
     question: str = body.get("question", "").strip()
     api_key: str = body.get("api_key", "").strip()
@@ -522,22 +522,28 @@ async def _ws_suggest(websocket: WebSocket, body: dict):
         return
 
     history = _conversation_history if use_history else None
+    full_chunks: list[str] = []
+    is_error = False
 
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None, get_ai_suggestion, final_user, final_system, api_key, history
-    )
-
-    if result.startswith("AI error:"):
-        await websocket.send_json({"type": "suggestion_error", "text": result})
-        return
-
-    _conversation_history.append((question, result))
-    if len(_conversation_history) > _max_history:
-        _conversation_history.pop(0)
-
-    await websocket.send_json({"type": "suggestion_chunk", "text": result})
-    await websocket.send_json({"type": "suggestion_done", "history_count": len(_conversation_history)})
+    try:
+        async for chunk_text in async_stream_ai_suggestion(final_user, final_system, api_key, history):
+            if chunk_text.startswith("AI error:"):
+                await websocket.send_json({"type": "suggestion_error", "text": chunk_text})
+                is_error = True
+                return
+            full_chunks.append(chunk_text)
+            await websocket.send_json({"type": "suggestion_chunk", "text": chunk_text})
+    except Exception as e:
+        await websocket.send_json({"type": "suggestion_error", "text": f"AI error: {e}"})
+        is_error = True
+    finally:
+        if not is_error:
+            full_text = "".join(full_chunks)
+            if full_text:
+                _conversation_history.append((question, full_text))
+                if len(_conversation_history) > _max_history:
+                    _conversation_history.pop(0)
+            await websocket.send_json({"type": "suggestion_done", "history_count": len(_conversation_history)})
 
 
 
