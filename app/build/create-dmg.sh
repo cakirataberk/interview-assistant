@@ -3,7 +3,7 @@
 set -e
 
 APP_NAME="Interview Assistant"
-VERSION="1.0.0"
+VERSION="1.1.0"
 DIST="./dist"
 APP_PATH="$DIST/mac-arm64/$APP_NAME.app"
 DMG_OUT="$DIST/$APP_NAME-$VERSION-arm64.dmg"
