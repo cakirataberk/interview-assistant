@@ -11,14 +11,14 @@ A real-time interview copilot for macOS. Listens to interview audio via micropho
 Two separate codebases communicate over HTTP/WebSocket on `localhost:7432`:
 
 **Python Backend** (`backend/`)
-- `server.py` — FastAPI server (uvicorn on port 7432). REST endpoints + WebSocket for real-time transcription streaming. Manages audio capture threads, conversation history (last 5 Q&A pairs), and recording.
+- `server.py` — FastAPI server (uvicorn on port 7432). REST endpoints + WebSocket for real-time transcription streaming. Manages audio capture threads, conversation history (last 5 Q&A pairs), and recording. Uses `_broadcast_sync` to bridge between PyAudio worker threads and the asyncio event loop via `asyncio.run_coroutine_threadsafe`.
 - `audio.py` — Whisper model loading (with SHA256 checksum patching), PCM/WAV transcription, microphone device enumeration via PyAudio. Models cached in `~/.cache/whisper/`.
-- `ai.py` — Google Gemini integration. Tries models in order: `gemini-2.5-flash` > `gemini-2.0-flash` > `gemini-2.0-flash-lite` > `gemini-flash-latest`. Both streaming and non-streaming generation.
+- `ai.py` — Google Gemini integration. Tries models in order: `gemini-2.5-flash` → `gemini-2.0-flash`. Both async streaming (`async_stream_ai_suggestion`) and sync variants.
 - `config.py` — JSON config stored at `~/.interview_assistant/config.json`. Merges saved values over defaults.
 - `setup_env.py` — First-run bootstrap: creates a venv at `~/.interview_assistant/venv`, installs all Python deps. Called by Electron on first launch.
 
 **Electron + React Frontend** (`app/`)
-- `electron/main.cjs` — Electron main process. Spawns the Python backend, manages first-run setup, BlackHole audio driver installation, IPC for window opacity/always-on-top.
+- `electron/main.cjs` — Electron main process. Spawns the Python backend, manages first-run setup, BlackHole audio driver installation, IPC for window opacity/always-on-top. Python executable lookup order: persistent user venv → dev project `.venv` → Homebrew `python3.11` → `python3`.
 - `electron/preload.cjs` — Context bridge exposing `electronAPI` to renderer.
 - `src/App.tsx` — Root component with tab switching (Assistant/Setup) and config state.
 - `src/components/MainPanel.tsx` — Main UI: transcription display, AI suggestion panel, teleprompter mode, keyboard shortcuts.
@@ -35,8 +35,28 @@ Two separate codebases communicate over HTTP/WebSocket on `localhost:7432`:
 2. Backend opens PyAudio stream, detects speech via energy threshold (RMS > 300)
 3. Partial transcriptions sent over WebSocket (`type: "partial"`) every ~1.5s of speech
 4. Final transcription sent (`type: "transcription"`) after ~0.55s of silence
-5. User triggers suggestion via `POST /suggest/stream` (SSE) or WebSocket `cmd: suggest`
-6. Gemini response streams back as chunks
+5. User triggers suggestion — primarily via WebSocket `cmd: suggest` (lower latency); SSE path `POST /suggest/stream` also exists
+6. Gemini response streams back as `type: "suggestion_chunk"` messages, terminated by `type: "suggestion_done"`
+
+**WebSocket message types** (server → client):
+- `{ type: "transcription", text }` — final phrase transcription
+- `{ type: "partial", text }` — mid-phrase rolling transcription
+- `{ type: "status", text }` — status string e.g. `"transcribing…"`, `"silence"`
+- `{ type: "suggestion_chunk", text }` — streamed AI response token
+- `{ type: "suggestion_done", history_count }` — AI response complete
+- `{ type: "suggestion_error", text }` — AI or template error
+- `{ type: "pong" }` — response to `cmd: ping`
+
+**REST endpoints** (all on port 7432):
+- `GET /health` — liveness check
+- `GET/POST /config` — read/write user config
+- `GET /devices` — list PyAudio input devices
+- `POST /listen/start` — begin audio capture (`device_index`, `transcription_mode`)
+- `POST /listen/stop` — stop audio capture
+- `POST /suggest/stream` — SSE streaming suggestion (alternative to WS path)
+- `POST /history/clear` — reset conversation history
+- `POST /record/start` — begin raw WAV recording to `~/.interview_assistant/recordings/`
+- `POST /record/stop` — stop and save WAV recording
 
 ## Development Commands
 
@@ -73,6 +93,7 @@ npx tsc -b
 - **Whisper checksum patching**: `audio.py` monkey-patches `whisper._download` to skip SHA256 verification when the env var `WHISPER_SKIP_CHECKSUM=1` is set (default). This works around stale hashes in older whisper releases.
 - Transcription profiles: English (`base.en`), Turkish (`small`), Mixed TR+EN (`small`, no language hint)
 - User config persists at `~/.interview_assistant/config.json`; venv at `~/.interview_assistant/venv`
+- **Electron packaging**: `electron-builder` bundles only `**/*.py` files from `backend/` as `extraResources` (accessible at `process.resourcesPath/backend/` in production). Non-Python backend files are not packaged.
 - Frontend uses **Tailwind CSS v4** (via `@tailwindcss/vite` plugin), **React 19**, **Vite 8**
 - Electron main process is CommonJS (`.cjs` files), frontend is ESM
 - CI: GitHub Actions builds macOS ARM64 DMG on tag push (`v*`) — see `.github/workflows/build.yml`

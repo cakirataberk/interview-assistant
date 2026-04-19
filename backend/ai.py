@@ -1,135 +1,76 @@
+"""
+AI proxy client — all Gemini calls are proxied through basvur.ai.
+The desktop app never holds an AI key; only short-lived session JWTs.
+"""
+from __future__ import annotations
+
+import json
 from typing import AsyncGenerator
 
-from google import genai
-from google.genai import types
-
-MODELS_TO_TRY = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-]
-
-_client_cache: dict[str, genai.Client] = {}
+import httpx
 
 
-def _get_client(api_key: str) -> genai.Client:
-    if api_key not in _client_cache:
-        _client_cache[api_key] = genai.Client(api_key=api_key)
-    return _client_cache[api_key]
+class AIProxyError(Exception):
+    """Raised when the basvur.ai proxy returns a fatal response."""
+
+    def __init__(self, code: str, status: int = 0, detail: str = ""):
+        super().__init__(f"{code} ({status}): {detail}")
+        self.code = code
+        self.status = status
+        self.detail = detail
 
 
 async def async_stream_ai_suggestion(
-    user_question: str,
-    system_prompt: str,
-    api_key: str,
+    question: str,
+    session_jwt: str,
+    api_base: str,
     conversation_history: list[tuple[str, str]] | None = None,
+    locale: str = "tr",
 ) -> AsyncGenerator[str, None]:
-    """Async generator that yields text chunks from Gemini streaming API."""
-    try:
-        client = _get_client(api_key)
+    """Proxy streaming through basvur.ai /api/interview/suggest.
 
-        if conversation_history:
-            history_text = "\n\n--- Previous Conversation ---\n"
-            for i, (q_text, a_text) in enumerate(conversation_history[-5:], 1):
-                history_text += f"\nQ{i}: {q_text}\nA{i}: {a_text}\n"
-            history_text += "\n--- Current Question ---\n"
-            full_question = history_text + user_question
-        else:
-            full_question = user_question
+    Yields text chunks. Raises AIProxyError on auth/quota/server failure.
+    """
+    url = f"{api_base.rstrip('/')}/api/interview/suggest"
+    payload = {
+        "question": question,
+        "history": [
+            {"q": q, "a": a} for q, a in (conversation_history or [])
+        ][-5:],
+        "locale": locale,
+    }
 
-        last_err = None
-        for model_name in MODELS_TO_TRY:
-            try:
-                async for chunk in await client.aio.models.generate_content_stream(
-                    model=model_name,
-                    contents=full_question,
-                    config=types.GenerateContentConfig(system_instruction=system_prompt),
-                ):
-                    if chunk.text:
-                        yield chunk.text
-                return
-            except Exception as e:
-                print(f"[AI] {model_name} failed: {e}", flush=True)
-                last_err = e
-                continue
+    async with httpx.AsyncClient(timeout=60) as client:
+        async with client.stream(
+            "POST",
+            url,
+            headers={"Authorization": f"Bearer {session_jwt}"},
+            json=payload,
+        ) as resp:
+            if resp.status_code == 401:
+                raise AIProxyError("unauthorized", 401, "session expired")
+            if resp.status_code == 403:
+                raise AIProxyError("trial_expired", 403, "quota exhausted")
+            if resp.status_code != 200:
+                body = (await resp.aread()).decode(errors="replace")
+                raise AIProxyError("proxy_error", resp.status_code, body[:200])
 
-        yield f"AI error: {last_err}"
-    except Exception as err:
-        yield f"AI error: {err}"
-
-
-def stream_ai_suggestion(
-    user_question: str,
-    system_prompt: str,
-    api_key: str,
-    conversation_history: list[tuple[str, str]] | None = None,
-):
-    """Yields text chunks as Gemini streams them."""
-    try:
-        client = _get_client(api_key)
-
-        if conversation_history:
-            history_text = "\n\n--- Previous Conversation ---\n"
-            for i, (q_text, a_text) in enumerate(conversation_history[-5:], 1):
-                history_text += f"\nQ{i}: {q_text}\nA{i}: {a_text}\n"
-            history_text += "\n--- Current Question ---\n"
-            full_question = history_text + user_question
-        else:
-            full_question = user_question
-
-        last_err = None
-        for model_name in MODELS_TO_TRY:
-            try:
-                for chunk in client.models.generate_content_stream(
-                    model=model_name,
-                    contents=full_question,
-                    config=types.GenerateContentConfig(system_instruction=system_prompt),
-                ):
-                    if chunk.text:
-                        yield chunk.text
-                return
-            except Exception as e:
-                print(f"[AI] {model_name} failed: {e}", flush=True)
-                last_err = e
-                continue
-
-        yield f"AI error: {last_err}"
-    except Exception as err:
-        yield f"AI error: {err}"
-
-
-def get_ai_suggestion(
-    user_question: str,
-    system_prompt: str,
-    api_key: str,
-    conversation_history: list[tuple[str, str]] | None = None,
-) -> str:
-    try:
-        client = _get_client(api_key)
-
-        if conversation_history:
-            history_text = "\n\n--- Previous Conversation ---\n"
-            for i, (q_text, a_text) in enumerate(conversation_history[-5:], 1):
-                history_text += f"\nQ{i}: {q_text}\nA{i}: {a_text}\n"
-            history_text += "\n--- Current Question ---\n"
-            full_question = history_text + user_question
-        else:
-            full_question = user_question
-
-        last_err = None
-        for model_name in MODELS_TO_TRY:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=full_question,
-                    config=types.GenerateContentConfig(system_instruction=system_prompt),
-                )
-                print(f"[AI] Used model: {model_name}", flush=True)
-                return response.text
-            except Exception as e:
-                print(f"[AI] {model_name} failed: {e}", flush=True)
-                last_err = e
-                continue
-
-        return f"AI error: {last_err}"
-    except Exception as err:
-        return f"AI error: {err}"
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if not raw:
+                    continue
+                try:
+                    evt = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if evt.get("error"):
+                    raise AIProxyError(
+                        str(evt.get("error")), 200, str(evt.get("detail", ""))
+                    )
+                if evt.get("done"):
+                    return
+                text = evt.get("text")
+                if text:
+                    yield text

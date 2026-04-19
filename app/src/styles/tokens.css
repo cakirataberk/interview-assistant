@@ -1,0 +1,38 @@
+@theme {
+  /* basvur.ai palette, tuned for a dark glass surface */
+  --color-bg: #0A1420;
+  --color-bg-translucent: rgba(10, 20, 32, 0.55);
+  --color-surface: rgba(19, 34, 56, 0.72);
+  --color-surface-solid: #132238;
+  --color-surface-2: rgba(27, 43, 68, 0.85);
+  --color-surface-3: #1B2B44;
+  --color-border: rgba(36, 56, 90, 0.8);
+  --color-border-strong: #24385A;
+
+  --color-primary: #1B4F72;
+  --color-primary-hover: #2563A0;
+  --color-primary-soft: rgba(27, 79, 114, 0.25);
+
+  --color-accent: #E67E22;
+  --color-accent-hover: #F08B30;
+  --color-accent-soft: rgba(230, 126, 34, 0.2);
+
+  --color-text: #E8EEF5;
+  --color-text-muted: #8FA3BE;
+  --color-text-dim: #55698A;
+
+  --color-success: #10B981;
+  --color-success-soft: rgba(16, 185, 129, 0.18);
+  --color-danger: #EF4444;
+  --color-warning: #F59E0B;
+
+  --radius-card: 16px;
+  --radius-btn: 10px;
+  --radius-chip: 999px;
+
+  --shadow-card: 0 6px 24px -10px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 18px 40px -18px rgba(0, 0, 0, 0.75);
+
+  --font-sans: -apple-system, "SF Pro Text", "SF Pro Display", "Inter", system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Menlo, monospace;
+}

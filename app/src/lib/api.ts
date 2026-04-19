@@ -1,6 +1,32 @@
 const BASE = 'http://127.0.0.1:7432'
 
-export async function getConfig() {
+export type AppConfigRemote = {
+  window_alpha: number
+  microphone_device_index: number
+  transcription_mode: string
+  api_base: string
+  locale: string
+  has_device_token: boolean
+}
+
+export type JobOption = {
+  id: string
+  jobTitle: string
+  company: string | null
+  jobDescription: string
+  status: string | null
+}
+
+export type ActiveSession = {
+  sessionId: string
+  plan: 'FREE' | 'PRO'
+  secondsRemaining: number
+  jobTitle: string
+  company: string
+  locale: string
+}
+
+export async function getConfig(): Promise<AppConfigRemote> {
   const r = await fetch(`${BASE}/config`)
   return r.json()
 }
@@ -19,6 +45,68 @@ export async function getDevices(): Promise<{ index: number; name: string }[]> {
   return r.json()
 }
 
+export async function authLogout() {
+  const r = await fetch(`${BASE}/auth/logout`, { method: 'POST' })
+  return r.json()
+}
+
+export async function getJobs(): Promise<{ jobs: JobOption[] } | { error: string }> {
+  const r = await fetch(`${BASE}/jobs`)
+  return r.json()
+}
+
+export type SessionStartResponse =
+  | {
+      ok: true
+      sessionId: string
+      plan: 'FREE' | 'PRO'
+      secondsRemaining: number
+      jobTitle: string
+      company: string
+    }
+  | { error: string; detail?: string; status?: number }
+
+export async function startSession(params: {
+  jobMatchId?: string | null
+  customJdSnippet?: string | null
+  customJdTitle?: string | null
+  customJdCompany?: string | null
+}): Promise<SessionStartResponse> {
+  const r = await fetch(`${BASE}/session/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jobMatchId: params.jobMatchId ?? null,
+      customJdSnippet: params.customJdSnippet ?? null,
+      customJdTitle: params.customJdTitle ?? null,
+      customJdCompany: params.customJdCompany ?? null,
+    }),
+  })
+  return r.json()
+}
+
+export async function endSession() {
+  const r = await fetch(`${BASE}/session/end`, { method: 'POST' })
+  return r.json()
+}
+
+export type GetSessionResponse =
+  | { active: false }
+  | {
+      active: true
+      sessionId: string
+      plan: 'FREE' | 'PRO'
+      secondsRemaining: number
+      jobTitle: string
+      company: string
+      locale: string
+    }
+
+export async function getSession(): Promise<GetSessionResponse> {
+  const r = await fetch(`${BASE}/session`)
+  return r.json()
+}
+
 export async function startListening(deviceIndex: number, transcriptionMode: string) {
   const r = await fetch(`${BASE}/listen/start`, {
     method: 'POST',
@@ -31,54 +119,6 @@ export async function startListening(deviceIndex: number, transcriptionMode: str
 export async function stopListening() {
   const r = await fetch(`${BASE}/listen/stop`, { method: 'POST' })
   return r.json()
-}
-
-export async function streamSuggestion(
-  params: {
-    question: string
-    api_key: string
-    cv: string
-    job_description: string
-    system_prompt: string
-    user_prompt: string
-  },
-  onChunk: (text: string) => void,
-  onDone: (historyCount: number) => void,
-  onError: (msg: string) => void,
-) {
-  let response: Response
-  try {
-    response = await fetch(`${BASE}/suggest/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    })
-  } catch {
-    onError('Backend unreachable')
-    return
-  }
-
-  const reader = response.body?.getReader()
-  if (!reader) { onError('No stream'); return }
-  const decoder = new TextDecoder()
-  let buf = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const lines = buf.split('\n')
-    buf = lines.pop() ?? ''
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      try {
-        const data = JSON.parse(line.slice(6))
-        if (data.text) onChunk(data.text)
-        if (data.done) onDone(data.history_count ?? 0)
-        if (data.error) onError(data.error)
-      } catch { /* partial line */ }
-    }
-  }
 }
 
 export async function clearHistory() {

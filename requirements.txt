@@ -1,8 +1,10 @@
 ## Use with Python 3.11+ (recommended)
 SpeechRecognition
-google-generativeai
 openai-whisper
 soundfile
 pyaudio
 pyinstaller
 py2app
+fastapi
+uvicorn
+httpx

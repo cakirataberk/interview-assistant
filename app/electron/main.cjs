@@ -3,14 +3,39 @@ const path = require('path')
 const { spawn } = require('child_process')
 const fs = require('fs')
 const os = require('os')
+const crypto = require('crypto')
+const http = require('http')
+const https = require('https')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 const VENV_DIR = path.join(os.homedir(), '.interview_assistant', 'venv')
 const SETUP_MARKER = path.join(os.homedir(), '.interview_assistant', '.setup_done')
 
+const API_BASE = process.env.BASVUR_API_BASE || 'https://basvur-ai.vercel.app'
+const DEEP_LINK_SCHEME = 'basvurai'
+
 let mainWindow = null
 let pythonProcess = null
+let pendingLinkState = null
+let pendingDeepLink = null
+
+// ── Single-instance + deep link registration ────────────────────────────────
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+  process.exit(0)
+}
+
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [
+      path.resolve(process.argv[1]),
+    ])
+  }
+} else {
+  app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME)
+}
 
 // ── Python paths ────────────────────────────────────────────────────────────
 
@@ -135,7 +160,6 @@ function stopPythonServer() {
 }
 
 async function waitForBackend(maxMs = 30000) {
-  const http = require('http')
   const start = Date.now()
   while (Date.now() - start < maxMs) {
     try {
@@ -152,16 +176,117 @@ async function waitForBackend(maxMs = 30000) {
   return false
 }
 
+// ── Deep link auth flow ─────────────────────────────────────────────────────
+
+function postJson(urlStr, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr)
+    const data = JSON.stringify(body)
+    const opts = {
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+      },
+    }
+    const lib = u.protocol === 'https:' ? https : http
+    const req = lib.request(opts, (res) => {
+      let chunks = ''
+      res.on('data', (c) => { chunks += c })
+      res.on('end', () => {
+        try {
+          const parsed = chunks ? JSON.parse(chunks) : {}
+          resolve({ status: res.statusCode || 0, body: parsed })
+        } catch {
+          resolve({ status: res.statusCode || 0, body: { raw: chunks } })
+        }
+      })
+    })
+    req.on('error', reject)
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(data)
+    req.end()
+  })
+}
+
+function notifyRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload)
+  }
+}
+
+async function handleDeepLink(urlStr) {
+  if (!urlStr || !urlStr.startsWith(`${DEEP_LINK_SCHEME}://`)) return
+  let parsed
+  try {
+    parsed = new URL(urlStr)
+  } catch {
+    return
+  }
+  if (parsed.hostname !== 'auth') return
+
+  const code = parsed.searchParams.get('code')
+  const state = parsed.searchParams.get('state')
+  if (!code) {
+    notifyRenderer('link-error', { message: 'missing code' })
+    return
+  }
+  if (pendingLinkState && state !== pendingLinkState) {
+    notifyRenderer('link-error', { message: 'state mismatch' })
+    return
+  }
+
+  notifyRenderer('link-progress', 'exchanging')
+
+  try {
+    const label = `${os.hostname()} — ${os.userInfo().username}`
+    const exchange = await postJson(`${API_BASE}/api/device/exchange`, {
+      code,
+      state,
+      label,
+    })
+    if (exchange.status !== 200 || !exchange.body?.deviceToken) {
+      notifyRenderer('link-error', {
+        message: exchange.body?.error || `exchange failed (${exchange.status})`,
+      })
+      return
+    }
+    const deviceToken = exchange.body.deviceToken
+
+    // Write to backend config so Python has the long-lived token
+    const tokenWrite = await postJson('http://127.0.0.1:7432/auth/token', {
+      device_token: deviceToken,
+      api_base: API_BASE,
+    })
+    if (tokenWrite.status !== 200) {
+      notifyRenderer('link-error', { message: 'backend token write failed' })
+      return
+    }
+
+    pendingLinkState = null
+    notifyRenderer('link-done', { ok: true })
+  } catch (err) {
+    notifyRenderer('link-error', { message: String(err?.message || err) })
+  }
+}
+
 // ── Window ───────────────────────────────────────────────────────────────────
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 860,
-    minWidth: 860,
-    minHeight: 700,
+    width: 1100,
+    height: 800,
+    minWidth: 900,
+    minHeight: 640,
     titleBarStyle: 'hiddenInset',
-    backgroundColor: '#0a0a0a',
+    trafficLightPosition: { x: 16, y: 16 },
+    backgroundColor: '#00000000',
+    vibrancy: 'under-window',
+    visualEffectState: 'active',
+    transparent: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -176,7 +301,15 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
 
-  mainWindow.once('ready-to-show', () => mainWindow.show())
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show()
+    // If a deep link arrived before the window was ready, replay it now
+    if (pendingDeepLink) {
+      const url = pendingDeepLink
+      pendingDeepLink = null
+      handleDeepLink(url)
+    }
+  })
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
@@ -191,6 +324,16 @@ ipcMain.handle('run-setup', async () => {
   const ok = await runSetup()
   return ok
 })
+
+ipcMain.handle('start-link-flow', async (_e, locale = 'tr') => {
+  const state = crypto.randomBytes(16).toString('hex')
+  pendingLinkState = state
+  const url = `${API_BASE}/${locale}/interview-copilot/link?state=${encodeURIComponent(state)}`
+  await shell.openExternal(url)
+  return { ok: true, state }
+})
+
+ipcMain.handle('get-api-base', () => API_BASE)
 
 // ── BlackHole ─────────────────────────────────────────────────────────────────
 
@@ -257,6 +400,28 @@ ipcMain.handle('blackhole-install', () => {
 })
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────
+
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  if (mainWindow) {
+    handleDeepLink(url)
+  } else {
+    pendingDeepLink = url
+  }
+})
+
+app.on('second-instance', (_e, argv) => {
+  // On Windows/Linux the deep-link URL arrives via argv on second launch
+  const linkArg = argv.find((a) => a.startsWith(`${DEEP_LINK_SCHEME}://`))
+  if (linkArg) {
+    if (mainWindow) handleDeepLink(linkArg)
+    else pendingDeepLink = linkArg
+  }
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
+})
 
 app.whenReady().then(async () => {
   createWindow()

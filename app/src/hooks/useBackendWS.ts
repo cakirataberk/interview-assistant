@@ -7,6 +7,8 @@ type WSMessage =
   | { type: 'suggestion_chunk'; text: string }
   | { type: 'suggestion_done'; history_count: number }
   | { type: 'suggestion_error'; text: string }
+  | { type: 'quota'; secondsRemaining: number; shouldStop: boolean }
+  | { type: 'session_expired'; reason?: string }
   | { type: 'pong' }
 
 type Handlers = {
@@ -16,6 +18,8 @@ type Handlers = {
   onSuggestionChunk?: (text: string) => void
   onSuggestionDone?: (historyCount: number) => void
   onSuggestionError?: (text: string) => void
+  onQuota?: (secondsRemaining: number, shouldStop: boolean) => void
+  onSessionExpired?: (reason?: string) => void
 }
 
 export function useBackendWS(handlers: Handlers) {
@@ -32,19 +36,15 @@ export function useBackendWS(handlers: Handlers) {
     ws.onmessage = (event) => {
       try {
         const msg: WSMessage = JSON.parse(event.data)
-        if (msg.type === 'transcription') {
-          handlersRef.current.onTranscription?.(msg.text)
-        } else if (msg.type === 'partial') {
-          handlersRef.current.onPartial?.(msg.text)
-        } else if (msg.type === 'status') {
-          handlersRef.current.onStatus?.(msg.text)
-        } else if (msg.type === 'suggestion_chunk') {
-          handlersRef.current.onSuggestionChunk?.(msg.text)
-        } else if (msg.type === 'suggestion_done') {
-          handlersRef.current.onSuggestionDone?.(msg.history_count)
-        } else if (msg.type === 'suggestion_error') {
-          handlersRef.current.onSuggestionError?.(msg.text)
-        }
+        const h = handlersRef.current
+        if (msg.type === 'transcription') h.onTranscription?.(msg.text)
+        else if (msg.type === 'partial') h.onPartial?.(msg.text)
+        else if (msg.type === 'status') h.onStatus?.(msg.text)
+        else if (msg.type === 'suggestion_chunk') h.onSuggestionChunk?.(msg.text)
+        else if (msg.type === 'suggestion_done') h.onSuggestionDone?.(msg.history_count)
+        else if (msg.type === 'suggestion_error') h.onSuggestionError?.(msg.text)
+        else if (msg.type === 'quota') h.onQuota?.(msg.secondsRemaining, msg.shouldStop)
+        else if (msg.type === 'session_expired') h.onSessionExpired?.(msg.reason)
       } catch {
         // ignore
       }
@@ -59,10 +59,10 @@ export function useBackendWS(handlers: Handlers) {
     }
   }, [])
 
-  const sendSuggest = useCallback((params: Record<string, unknown>) => {
+  const sendSuggest = useCallback((question: string) => {
     const ws = wsRef.current
     if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ cmd: 'suggest', ...params }))
+      ws.send(JSON.stringify({ cmd: 'suggest', question }))
     }
   }, [])
 

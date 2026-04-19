@@ -1,9 +1,19 @@
 """
-Interview Assistant – FastAPI backend
+Interview Assistant – FastAPI backend (server-first rewrite)
 Runs on http://localhost:7432
+
+Auth flow:
+  1. Desktop app gets a long-lived `device_token` from basvur.ai (deep link)
+  2. `POST /session/start` exchanges the device_token for a short-lived session JWT,
+     plus CV + JD context from the server.
+  3. All AI calls (`/suggest/stream`, WS cmd=suggest) use the session JWT.
+  4. Heartbeat thread pings `/api/interview/session/heartbeat` every 30s while
+     listening so FREE tier seconds are decremented and sessions can be force-stopped.
 """
-import os
-import queue
+from __future__ import annotations
+
+import asyncio
+import json
 import threading
 import time
 import wave
@@ -12,8 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import asyncio
-import json
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -22,26 +31,33 @@ from audio import (
     TRANSCRIPTION_PROFILES,
     list_microphone_devices,
     preload_whisper_small,
-    transcribe_audio,
     transcribe_pcm,
 )
 from config import load_config, save_config
 
 
+# ── Lifecycle ──────────────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _main_loop
-    import asyncio
     _main_loop = asyncio.get_event_loop()
+
     def _preload():
-        preload_whisper_small(on_status=lambda msg: _broadcast_sync({"type": "status", "text": msg}))
+        preload_whisper_small(
+            on_status=lambda msg: _broadcast_sync({"type": "status", "text": msg})
+        )
+
     threading.Thread(target=_preload, daemon=True).start()
     yield
+    # Make sure any active session is ended cleanly on shutdown
+    _stop_heartbeat()
+    _end_active_session_sync()
 
 
 app = FastAPI(title="Interview Assistant API", lifespan=lifespan)
 
-_main_loop = None  # set once the event loop starts
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,6 +65,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -62,14 +79,12 @@ _listening_lock = threading.Lock()
 _current_mode = "TR + ENG (Mixed)"
 _current_device_index = 0
 
-# ── Streaming constants ────────────────────────────────────────────────────────
-SAMPLE_RATE   = 16000
-CHUNK_FRAMES  = 512                                   # ~32 ms per chunk
-ENERGY_THRESH = 300                                   # RMS silence threshold
-# after this many speech chunks, fire a partial transcription
-PARTIAL_CHUNKS = int(1.5 * SAMPLE_RATE / CHUNK_FRAMES)   # ~1.5 s
-# this many silent chunks = end of phrase
-SILENCE_END_CHUNKS = int(0.55 * SAMPLE_RATE / CHUNK_FRAMES)  # ~0.55 s
+# Streaming audio constants
+SAMPLE_RATE = 16000
+CHUNK_FRAMES = 512
+ENERGY_THRESH = 300
+PARTIAL_CHUNKS = int(1.5 * SAMPLE_RATE / CHUNK_FRAMES)
+SILENCE_END_CHUNKS = int(0.55 * SAMPLE_RATE / CHUNK_FRAMES)
 
 _is_recording = False
 _recording_thread: Optional[threading.Thread] = None
@@ -78,8 +93,16 @@ _recording_start: Optional[float] = None
 _pyaudio_instance = None
 _audio_stream = None
 
+# Session state (one active session at a time)
+_session_lock = threading.Lock()
+_active_session: Optional[dict] = None  # {sessionJwt, sessionId, cv, jd, ...}
+_heartbeat_stop: Optional[threading.Event] = None
+_heartbeat_thread: Optional[threading.Thread] = None
+_heartbeat_last = 0.0
+_listening_since: Optional[float] = None
+
 _conversation_history: list[tuple[str, str]] = []
-_max_history = 5
+_MAX_HISTORY = 5
 
 
 # ── WebSocket broadcast ────────────────────────────────────────────────────────
@@ -100,7 +123,6 @@ async def _broadcast(payload: dict) -> None:
 
 
 def _broadcast_sync(payload: dict) -> None:
-    import asyncio
     loop = _main_loop
     if loop is None or not loop.is_running():
         return
@@ -121,7 +143,6 @@ def _broadcast_sync(payload: dict) -> None:
 # ── Streaming audio worker ────────────────────────────────────────────────────
 
 def _do_transcribe(pcm: bytes, model_name: str, lang, is_final: bool):
-    """Run in a thread — transcribe PCM and broadcast result."""
     try:
         text = transcribe_pcm(pcm, SAMPLE_RATE, model_name, lang)
         if text.strip():
@@ -134,9 +155,12 @@ def _do_transcribe(pcm: bytes, model_name: str, lang, is_final: bool):
 
 
 def _stream_worker(device_index: int, mode: str, stop_evt: threading.Event):
-    import pyaudio, numpy as np
+    import pyaudio
+    import numpy as np
 
-    model_name, lang = TRANSCRIPTION_PROFILES.get(mode, TRANSCRIPTION_PROFILES["TR + ENG (Mixed)"])
+    model_name, lang = TRANSCRIPTION_PROFILES.get(
+        mode, TRANSCRIPTION_PROFILES["TR + ENG (Mixed)"]
+    )
 
     pa = pyaudio.PyAudio()
     try:
@@ -153,8 +177,8 @@ def _stream_worker(device_index: int, mode: str, stop_evt: threading.Event):
         pa.terminate()
         return
 
-    speech_buf: list[bytes] = []   # full current phrase
-    window_buf: list[bytes] = []   # rolling partial window
+    speech_buf: list[bytes] = []
+    window_buf: list[bytes] = []
     silence_count = 0
     speaking = False
 
@@ -175,7 +199,6 @@ def _stream_worker(device_index: int, mode: str, stop_evt: threading.Event):
             speech_buf.append(raw)
             window_buf.append(raw)
 
-            # Partial transcription every PARTIAL_CHUNKS chunks
             if len(window_buf) >= PARTIAL_CHUNKS:
                 pcm = b"".join(window_buf)
                 window_buf = []
@@ -190,7 +213,6 @@ def _stream_worker(device_index: int, mode: str, stop_evt: threading.Event):
                 silence_count += 1
                 speech_buf.append(raw)
                 if silence_count >= SILENCE_END_CHUNKS:
-                    # End of phrase — transcribe full buffer as final
                     pcm = b"".join(speech_buf)
                     speech_buf = []
                     window_buf = []
@@ -209,6 +231,126 @@ def _stream_worker(device_index: int, mode: str, stop_evt: threading.Event):
     print("[stream] stopped", flush=True)
 
 
+# ── Session helpers ────────────────────────────────────────────────────────────
+
+def _get_api_base() -> str:
+    return load_config().get("api_base", "").rstrip("/")
+
+
+def _get_device_token() -> str:
+    return load_config().get("device_token", "")
+
+
+def _get_session_jwt() -> Optional[str]:
+    with _session_lock:
+        if _active_session:
+            return _active_session.get("sessionJwt")
+    return None
+
+
+def _set_active_session(data: dict) -> None:
+    global _active_session
+    with _session_lock:
+        _active_session = data
+
+
+def _clear_active_session() -> None:
+    global _active_session
+    with _session_lock:
+        _active_session = None
+
+
+def _heartbeat_loop(stop_evt: threading.Event):
+    """Send /session/heartbeat every ~30s while listening."""
+    global _heartbeat_last, _listening_since
+    while not stop_evt.is_set():
+        stop_evt.wait(30)
+        if stop_evt.is_set():
+            return
+        jwt = _get_session_jwt()
+        if not jwt or _listening_since is None:
+            continue
+        now = time.time()
+        seconds = int(now - max(_heartbeat_last, _listening_since))
+        if seconds <= 0:
+            continue
+        _heartbeat_last = now
+
+        try:
+            r = httpx.post(
+                f"{_get_api_base()}/api/interview/session/heartbeat",
+                headers={"Authorization": f"Bearer {jwt}"},
+                json={"secondsElapsed": seconds},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                _broadcast_sync(
+                    {
+                        "type": "quota",
+                        "secondsRemaining": data.get("secondsRemaining"),
+                        "shouldStop": bool(data.get("shouldStop")),
+                    }
+                )
+                if data.get("shouldStop"):
+                    _broadcast_sync(
+                        {"type": "status", "text": "Trial süresi bitti"}
+                    )
+                    # Auto-stop listening
+                    _stop_listening_internal()
+            elif r.status_code == 401:
+                _broadcast_sync({"type": "session_expired"})
+                _stop_listening_internal()
+            else:
+                print(f"[heartbeat] status={r.status_code}", flush=True)
+        except Exception as err:
+            print(f"[heartbeat] error: {err}", flush=True)
+
+
+def _start_heartbeat():
+    global _heartbeat_thread, _heartbeat_stop, _heartbeat_last, _listening_since
+    _heartbeat_last = time.time()
+    _listening_since = time.time()
+    _heartbeat_stop = threading.Event()
+    _heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop, args=(_heartbeat_stop,), daemon=True
+    )
+    _heartbeat_thread.start()
+
+
+def _stop_heartbeat():
+    global _heartbeat_stop, _heartbeat_thread, _listening_since
+    if _heartbeat_stop is not None:
+        _heartbeat_stop.set()
+    _heartbeat_thread = None
+    _heartbeat_stop = None
+    _listening_since = None
+
+
+def _stop_listening_internal():
+    global _stop_event
+    with _listening_lock:
+        if _stop_event is not None:
+            _stop_event.set()
+            _stop_event = None
+    _stop_heartbeat()
+
+
+def _end_active_session_sync():
+    jwt = _get_session_jwt()
+    if not jwt:
+        return
+    try:
+        httpx.post(
+            f"{_get_api_base()}/api/interview/session/end",
+            headers={"Authorization": f"Bearer {jwt}"},
+            timeout=5,
+        )
+    except Exception:
+        pass
+    _clear_active_session()
+
+
 # ── HTTP endpoints ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -219,15 +361,13 @@ def health():
 @app.get("/config")
 def get_config():
     config = load_config()
+    # Redact token from GET response — renderer only needs a boolean
+    config["has_device_token"] = bool(config.get("device_token"))
+    config.pop("device_token", None)
     saved_idx = config.get("microphone_device_index", 0)
     devices = list_microphone_devices()
-    if not devices:
-        return config
-    # If saved device is not a valid input, auto-select best device:
-    # Priority: BlackHole > first virtual/loopback > first input device
-    if not any(d["index"] == saved_idx for d in devices):
-        preferred = _pick_preferred_device(devices)
-        config["microphone_device_index"] = preferred
+    if devices and not any(d["index"] == saved_idx for d in devices):
+        config["microphone_device_index"] = _pick_preferred_device(devices)
     return config
 
 
@@ -244,7 +384,28 @@ def _pick_preferred_device(devices: list[dict]) -> int:
 
 @app.post("/config")
 def post_config(data: dict):
+    # Never accept arbitrary device_token overwrites through this endpoint;
+    # device_token is written by main process after deep-link exchange.
+    data.pop("device_token", None)
     save_config(data)
+    return {"ok": True}
+
+
+@app.post("/auth/token")
+def auth_token(body: dict):
+    """Main process writes device_token here after deep-link exchange."""
+    token = (body.get("device_token") or "").strip()
+    if not token:
+        return {"error": "missing token"}
+    save_config({"device_token": token})
+    return {"ok": True}
+
+
+@app.post("/auth/logout")
+def auth_logout():
+    _end_active_session_sync()
+    _stop_listening_internal()
+    save_config({"device_token": ""})
     return {"ok": True}
 
 
@@ -253,96 +414,125 @@ def get_devices():
     return list_microphone_devices()
 
 
-@app.post("/suggest")
-def suggest(body: dict):
-    from ai import get_ai_suggestion
+@app.get("/jobs")
+async def list_jobs():
+    token = _get_device_token()
+    if not token:
+        return {"error": "unauthorized"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"{_get_api_base()}/api/interview/jobs",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if r.status_code != 200:
+            return {"error": "proxy", "status": r.status_code}
+        return r.json()
 
-    question: str = body.get("question", "").strip()
-    api_key: str = body.get("api_key", "").strip()
-    cv: str = body.get("cv", "")
-    jd: str = body.get("job_description", "")
-    system_prompt_template: str = body.get("system_prompt", "")
-    user_prompt_template: str = body.get("user_prompt", '"{transcribed_text}"')
-    use_history: bool = body.get("use_history", True)
 
-    if not question:
-        return {"error": "question is empty"}
-    if not api_key:
-        return {"error": "api_key is required"}
+@app.post("/session/start")
+async def session_start(body: dict):
+    token = _get_device_token()
+    if not token:
+        return {"error": "unauthorized"}
 
-    try:
-        final_system = system_prompt_template.format(cv=cv, job_description=jd)
-        final_user = user_prompt_template.format(transcribed_text=question)
-    except KeyError as e:
-        return {"error": f"Template placeholder missing: {e}"}
+    payload = {
+        "jobMatchId": body.get("jobMatchId") or None,
+        "customJdSnippet": body.get("customJdSnippet") or None,
+        "customJdTitle": body.get("customJdTitle") or None,
+        "customJdCompany": body.get("customJdCompany") or None,
+        "locale": load_config().get("locale", "tr"),
+    }
 
-    history = _conversation_history if use_history else None
-    result = get_ai_suggestion(final_user, final_system, api_key, history)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"{_get_api_base()}/api/interview/session/start",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        if r.status_code == 401:
+            return {"error": "unauthorized"}
+        if r.status_code == 403:
+            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            return {"error": "trial_expired", **data}
+        if r.status_code != 200:
+            return {"error": "proxy", "status": r.status_code}
+        data = r.json()
 
-    _conversation_history.append((question, result))
-    if len(_conversation_history) > _max_history:
-        _conversation_history.pop(0)
+    # Cache session
+    _set_active_session(
+        {
+            "sessionJwt": data["sessionJwt"],
+            "sessionId": data["sessionId"],
+            "cv": data.get("cv", ""),
+            "jobDescription": data.get("jobDescription", ""),
+            "jobTitle": data.get("jobTitle", ""),
+            "company": data.get("company", ""),
+            "plan": data.get("plan"),
+            "secondsRemaining": data.get("secondsRemaining"),
+            "locale": data.get("locale", "tr"),
+        }
+    )
+    _conversation_history.clear()
+    return {
+        "ok": True,
+        "sessionId": data["sessionId"],
+        "plan": data.get("plan"),
+        "secondsRemaining": data.get("secondsRemaining"),
+        "jobTitle": data.get("jobTitle", ""),
+        "company": data.get("company", ""),
+    }
 
-    return {"suggestion": result, "history_count": len(_conversation_history)}
 
+@app.post("/session/end")
+async def session_end():
+    _stop_listening_internal()
+    _end_active_session_sync()
+    return {"ok": True}
+
+
+# ── AI suggest endpoints ──────────────────────────────────────────────────────
 
 @app.post("/suggest/stream")
 async def suggest_stream(body: dict):
-    from google import genai as _genai
-    from google.genai import types as _types
-    from ai import MODELS_TO_TRY
+    from ai import AIProxyError
 
-    question: str = body.get("question", "").strip()
-    api_key: str = body.get("api_key", "").strip()
-    cv: str = body.get("cv", "")
-    jd: str = body.get("job_description", "")
-    system_prompt_template: str = body.get("system_prompt", "")
-    user_prompt_template: str = body.get("user_prompt", '"{transcribed_text}"')
-    use_history: bool = body.get("use_history", True)
-
+    question: str = (body.get("question") or "").strip()
     if not question:
         return {"error": "question is empty"}
-    if not api_key:
-        return {"error": "api_key is required"}
 
-    try:
-        final_system = system_prompt_template.format(cv=cv, job_description=jd)
-        final_user = user_prompt_template.format(transcribed_text=question)
-    except KeyError as e:
-        return {"error": f"Template placeholder missing: {e}"}
+    jwt = _get_session_jwt()
+    if not jwt:
+        return {"error": "no_active_session"}
 
-    if use_history and _conversation_history:
-        history_text = "\n\n--- Previous Conversation ---\n"
-        for i, (q_text, a_text) in enumerate(_conversation_history[-5:], 1):
-            history_text += f"\nQ{i}: {q_text}\nA{i}: {a_text}\n"
-        history_text += "\n--- Current Question ---\n"
-        final_user = history_text + final_user
+    locale = (_active_session or {}).get("locale", "tr")
+    history = list(_conversation_history)
 
     async def generate():
-        client = _genai.Client(api_key=api_key)
-        full_chunks: list[str] = []
-        last_err = None
-        for model_name in MODELS_TO_TRY:
-            try:
-                async for chunk in await client.aio.models.generate_content_stream(
-                    model=model_name,
-                    contents=final_user,
-                    config=_types.GenerateContentConfig(system_instruction=final_system),
-                ):
-                    if chunk.text:
-                        full_chunks.append(chunk.text)
-                        yield f"data: {json.dumps({'text': chunk.text})}\n\n"
-                break
-            except Exception as e:
-                last_err = e
-                continue
-        else:
-            yield f"data: {json.dumps({'text': f'AI error: {last_err}'})}\n\n"
+        from ai import async_stream_ai_suggestion
+        collected: list[str] = []
+        try:
+            async for text in async_stream_ai_suggestion(
+                question=question,
+                session_jwt=jwt,
+                api_base=_get_api_base(),
+                conversation_history=history,
+                locale=locale,
+            ):
+                collected.append(text)
+                yield f"data: {json.dumps({'text': text})}\n\n"
+        except AIProxyError as err:
+            yield f"data: {json.dumps({'error': err.code, 'detail': err.detail})}\n\n"
+            if err.code in ("unauthorized", "trial_expired"):
+                _stop_listening_internal()
+            return
+        except Exception as err:
+            yield f"data: {json.dumps({'error': 'ai_failed', 'detail': str(err)})}\n\n"
+            return
 
-        full_text = "".join(full_chunks)
+        full_text = "".join(collected)
         if full_text:
             _conversation_history.append((question, full_text))
-            if len(_conversation_history) > _max_history:
+            if len(_conversation_history) > _MAX_HISTORY:
                 _conversation_history.pop(0)
         yield f"data: {json.dumps({'done': True, 'history_count': len(_conversation_history)})}\n\n"
 
@@ -359,9 +549,30 @@ def clear_history():
     return {"ok": True}
 
 
+@app.get("/session")
+def get_session():
+    with _session_lock:
+        if not _active_session:
+            return {"active": False}
+        return {
+            "active": True,
+            "sessionId": _active_session["sessionId"],
+            "plan": _active_session.get("plan"),
+            "secondsRemaining": _active_session.get("secondsRemaining"),
+            "jobTitle": _active_session.get("jobTitle", ""),
+            "company": _active_session.get("company", ""),
+            "locale": _active_session.get("locale", "tr"),
+        }
+
+
+# ── Listening ─────────────────────────────────────────────────────────────────
+
 @app.post("/listen/start")
 def start_listening(body: dict):
     global _stop_event, _stream_thread, _current_mode, _current_device_index
+
+    if not _get_session_jwt():
+        return {"error": "no_active_session"}
 
     device_index = int(body.get("device_index", 0))
     mode = body.get("transcription_mode", "TR + ENG (Mixed)")
@@ -369,7 +580,6 @@ def start_listening(body: dict):
     _current_device_index = device_index
 
     with _listening_lock:
-        # Stop existing stream if running
         if _stop_event is not None:
             _stop_event.set()
             if _stream_thread and _stream_thread.is_alive():
@@ -382,18 +592,18 @@ def start_listening(body: dict):
             daemon=True,
         )
         _stream_thread.start()
+
+    _start_heartbeat()
     return {"ok": True}
 
 
 @app.post("/listen/stop")
 def stop_listening():
-    global _stop_event
-    with _listening_lock:
-        if _stop_event is not None:
-            _stop_event.set()
-            _stop_event = None
+    _stop_listening_internal()
     return {"ok": True}
 
+
+# ── Recording (unchanged) ──────────────────────────────────────────────────────
 
 @app.post("/record/start")
 def start_recording(body: dict):
@@ -442,7 +652,7 @@ def stop_recording():
 
 def _record_audio_loop():
     global _pyaudio_instance, _audio_stream
-    frames = []
+    frames: list[bytes] = []
     try:
         while _is_recording and _audio_stream:
             data = _audio_stream.read(1024, exception_on_overflow=False)
@@ -487,9 +697,10 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            if data.get("cmd") == "ping":
+            cmd = data.get("cmd")
+            if cmd == "ping":
                 await websocket.send_json({"type": "pong"})
-            elif data.get("cmd") == "suggest":
+            elif cmd == "suggest":
                 await _ws_suggest(websocket, data)
     except WebSocketDisconnect:
         pass
@@ -500,53 +711,58 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def _ws_suggest(websocket: WebSocket, body: dict):
-    from ai import async_stream_ai_suggestion
+    from ai import async_stream_ai_suggestion, AIProxyError
 
-    question: str = body.get("question", "").strip()
-    api_key: str = body.get("api_key", "").strip()
-    cv: str = body.get("cv", "")
-    jd: str = body.get("job_description", "")
-    system_prompt_template: str = body.get("system_prompt", "")
-    user_prompt_template: str = body.get("user_prompt", '"{transcribed_text}"')
-    use_history: bool = body.get("use_history", True)
-
-    if not question or not api_key:
-        await websocket.send_json({"type": "suggestion_error", "text": "missing question or api_key"})
+    question: str = (body.get("question") or "").strip()
+    if not question:
+        await websocket.send_json(
+            {"type": "suggestion_error", "text": "missing question"}
+        )
         return
 
-    try:
-        final_system = system_prompt_template.format(cv=cv, job_description=jd)
-        final_user = user_prompt_template.format(transcribed_text=question)
-    except KeyError as e:
-        await websocket.send_json({"type": "suggestion_error", "text": f"template error: {e}"})
+    jwt = _get_session_jwt()
+    if not jwt:
+        await websocket.send_json(
+            {"type": "suggestion_error", "text": "no_active_session"}
+        )
         return
 
-    history = _conversation_history if use_history else None
+    locale = (_active_session or {}).get("locale", "tr")
     full_chunks: list[str] = []
-    is_error = False
-
     try:
-        async for chunk_text in async_stream_ai_suggestion(final_user, final_system, api_key, history):
-            if chunk_text.startswith("AI error:"):
-                await websocket.send_json({"type": "suggestion_error", "text": chunk_text})
-                is_error = True
-                return
-            full_chunks.append(chunk_text)
-            await websocket.send_json({"type": "suggestion_chunk", "text": chunk_text})
-    except Exception as e:
-        await websocket.send_json({"type": "suggestion_error", "text": f"AI error: {e}"})
-        is_error = True
-    finally:
-        if not is_error:
-            full_text = "".join(full_chunks)
-            if full_text:
-                _conversation_history.append((question, full_text))
-                if len(_conversation_history) > _max_history:
-                    _conversation_history.pop(0)
-            await websocket.send_json({"type": "suggestion_done", "history_count": len(_conversation_history)})
+        async for chunk in async_stream_ai_suggestion(
+            question=question,
+            session_jwt=jwt,
+            api_base=_get_api_base(),
+            conversation_history=list(_conversation_history),
+            locale=locale,
+        ):
+            full_chunks.append(chunk)
+            await websocket.send_json({"type": "suggestion_chunk", "text": chunk})
+    except AIProxyError as err:
+        await websocket.send_json(
+            {"type": "suggestion_error", "text": err.code, "detail": err.detail}
+        )
+        if err.code in ("unauthorized", "trial_expired"):
+            _stop_listening_internal()
+        return
+    except Exception as err:
+        await websocket.send_json(
+            {"type": "suggestion_error", "text": f"AI error: {err}"}
+        )
+        return
 
+    full_text = "".join(full_chunks)
+    if full_text:
+        _conversation_history.append((question, full_text))
+        if len(_conversation_history) > _MAX_HISTORY:
+            _conversation_history.pop(0)
+    await websocket.send_json(
+        {"type": "suggestion_done", "history_count": len(_conversation_history)}
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=7432, log_level="warning")

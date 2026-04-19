@@ -1,162 +1,259 @@
-import { useState, useEffect } from 'react'
-import { MainPanel } from './components/MainPanel'
-import { SetupPanel } from './components/SetupPanel'
+import { useEffect, useState, useCallback } from 'react'
 import { Loader2 } from 'lucide-react'
-import { getConfig } from './lib/api'
+import {
+  getConfig,
+  getSession,
+  saveConfig,
+  type AppConfigRemote,
+  type ActiveSession,
+} from './lib/api'
+import { LoginScreen } from './components/LoginScreen'
+import { SessionPickerScreen } from './components/SessionPickerScreen'
+import { MainPanel } from './components/MainPanel'
+import { SettingsPanel } from './components/SettingsPanel'
+import { OnboardingWizard } from './components/OnboardingWizard'
 import './index.css'
 
-type Tab = 'assistant' | 'setup'
+type Screen = 'loading' | 'login' | 'picker' | 'main' | 'settings' | 'onboarding'
 
-export interface AppConfig {
-  api_key: string
-  window_alpha: number
-  microphone_device_index: number
-  transcription_mode: string
-  cv: string
-  job_description: string
-  system_prompt: string
-  user_prompt: string
+type ElectronAPI = {
+  onBackendReady?: (cb: (r: boolean) => void) => void
+  onSetupProgress?: (cb: (msg: string) => void) => void
+  startLinkFlow?: (locale: string) => Promise<{ ok: boolean; state: string }>
+  onLinkProgress?: (cb: (stage: string) => void) => void
+  onLinkDone?: (cb: (data: { ok: boolean }) => void) => void
+  onLinkError?: (cb: (data: { message: string }) => void) => void
+  blackholeCheck?: () => Promise<boolean>
+  setOpacity?: (v: number) => Promise<void>
+  setAlwaysOnTop?: (v: boolean) => Promise<void>
 }
 
-const DEFAULT_CONFIG: AppConfig = {
-  api_key: '',
-  window_alpha: 0.96,
-  microphone_device_index: 0,
-  transcription_mode: 'TR + ENG (Mixed)',
-  cv: '',
-  job_description: '',
-  system_prompt: `You are my real-time interview copilot. answering questions live — speed matters.
-
-Language: Answer in Turkish. Use English for technical terms naturally.
-
-Format:
-- 4–6 sentences max. I need to read and speak this in seconds.
-- No intro, no filler, no "Harika soru" or "Şöyle açıklayayım".
-- Start with the answer. Lead with the strongest point.
-- Bullet points ONLY if listing 3+ items side by side.
-- Numbers and metrics first, explanation second.
-
-Style:
-- First person, natural spoken Turkish cadence.
-- Confident but not arrogant.
-
-For technical questions: give a clean textbook-level explanation first.
-For "what if" / challenge questions: Acknowledge in one clause, then defend with data.
-
-My background:
---- {cv} ---
-
-Role and job description:
---- {job_description} ---
-
-Golden rule: If my answer can be shorter and still land the point, make it shorter.`,
-  user_prompt: `Interviewer's question: "{transcribed_text}". Give me a ready-to-speak answer. Turkish with English technical terms.`,
+function electron(): ElectronAPI | undefined {
+  return (window as unknown as { electronAPI?: ElectronAPI }).electronAPI
 }
+
+const ONBOARDING_KEY = 'basvurai.onboardingComplete'
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('assistant')
-  const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG)
-  const [backendReady, setBackendReady] = useState(false)
-  const [loadingMsg, setLoadingMsg] = useState('Starting backend…')
+  const [screen, setScreen] = useState<Screen>('loading')
+  const [config, setConfig] = useState<AppConfigRemote | null>(null)
+  const [session, setSession] = useState<ActiveSession | null>(null)
+  const [loadingMsg, setLoadingMsg] = useState('Arka plan hazırlanıyor…')
 
-  useEffect(() => {
-    type ElectronAPI = {
-      onBackendReady: (cb: (r: boolean) => void) => void
-      onSetupProgress: (cb: (msg: string) => void) => void
-    }
-    const api = (window as unknown as { electronAPI?: ElectronAPI }).electronAPI
-    if (api?.onBackendReady) {
-      api.onSetupProgress?.((msg) => {
-        if (msg === 'SETUP_REQUIRED') setLoadingMsg('First-time setup…')
-        else if (msg.startsWith('INSTALLING:')) {
-          const parts = msg.split(':')
-          setLoadingMsg(`Installing packages (${parts[1]})…`)
-        } else if (msg === 'SETUP_DONE') setLoadingMsg('Starting backend…')
-        else if (msg === 'ENV_READY') setLoadingMsg('Starting backend…')
-      })
-      api.onBackendReady((ready) => {
-        if (ready) loadConfig()
-        else setLoadingMsg('Backend failed to start. Please restart the app.')
-      })
-    } else {
-      // Browser dev mode — poll until backend is up
-      pollUntilReady()
+  const refreshConfig = useCallback(async (): Promise<AppConfigRemote | null> => {
+    try {
+      const c = await getConfig()
+      setConfig(c)
+      return c
+    } catch {
+      return null
     }
   }, [])
 
-  async function pollUntilReady() {
-    for (let i = 0; i < 60; i++) {
-      try {
-        await fetch('http://127.0.0.1:7432/health')
-        await loadConfig()
-        return
-      } catch {
-        await new Promise((r) => setTimeout(r, 1000))
-      }
-    }
-    setLoadingMsg('Could not connect to backend.')
-  }
-
-  async function loadConfig() {
+  const refreshSession = useCallback(async (): Promise<ActiveSession | null> => {
     try {
-      const saved = await getConfig()
-      setConfig((prev) => ({ ...prev, ...saved }))
-      setBackendReady(true)
+      const s = await getSession()
+      if (s.active) {
+        const active: ActiveSession = {
+          sessionId: s.sessionId,
+          plan: s.plan,
+          secondsRemaining: s.secondsRemaining,
+          jobTitle: s.jobTitle,
+          company: s.company,
+          locale: s.locale,
+        }
+        setSession(active)
+        return active
+      }
+      setSession(null)
+      return null
     } catch {
-      setTimeout(loadConfig, 1000)
+      setSession(null)
+      return null
     }
-  }
+  }, [])
 
-  if (!backendReady) {
+  const bootstrap = useCallback(async () => {
+    const c = await refreshConfig()
+    if (!c) {
+      setTimeout(bootstrap, 1000)
+      return
+    }
+    const s = await refreshSession()
+    const onboardingDone = localStorage.getItem(ONBOARDING_KEY) === '1'
+    if (!c.has_device_token) {
+      setScreen(onboardingDone ? 'login' : 'onboarding')
+      return
+    }
+    if (s) {
+      setScreen('main')
+      return
+    }
+    setScreen('picker')
+  }, [refreshConfig, refreshSession])
+
+  useEffect(() => {
+    const api = electron()
+    if (api?.onBackendReady) {
+      api.onSetupProgress?.((msg) => {
+        if (msg === 'SETUP_REQUIRED') setLoadingMsg('İlk kurulum tamamlanıyor…')
+        else if (msg.startsWith('INSTALLING:')) {
+          const parts = msg.split(':')
+          setLoadingMsg(`Paketler kuruluyor (${parts[1]})…`)
+        } else if (msg === 'SETUP_DONE' || msg === 'ENV_READY') {
+          setLoadingMsg('Arka plan hazırlanıyor…')
+        }
+      })
+      api.onBackendReady((ready) => {
+        if (ready) bootstrap()
+        else setLoadingMsg('Arka plan başlatılamadı. Uygulamayı yeniden başlat.')
+      })
+    } else {
+      // Browser dev mode: poll until backend is alive
+      const poll = async () => {
+        for (let i = 0; i < 60; i++) {
+          try {
+            await fetch('http://127.0.0.1:7432/health')
+            bootstrap()
+            return
+          } catch {
+            await new Promise((r) => setTimeout(r, 1000))
+          }
+        }
+        setLoadingMsg('Arka plan bulunamadı.')
+      }
+      poll()
+    }
+  }, [bootstrap])
+
+  // Link flow listeners — applies once per app lifetime
+  useEffect(() => {
+    const api = electron()
+    api?.onLinkDone?.(async ({ ok }) => {
+      if (ok) {
+        await refreshConfig()
+        setScreen('picker')
+      }
+    })
+    api?.onLinkError?.(({ message }) => {
+      console.error('link error', message)
+    })
+  }, [refreshConfig])
+
+  const handleLogout = useCallback(async () => {
+    setSession(null)
+    await refreshConfig()
+    setScreen('login')
+  }, [refreshConfig])
+
+  const handleSessionStarted = useCallback(async () => {
+    await refreshSession()
+    setScreen('main')
+  }, [refreshSession])
+
+  const handleSessionEnded = useCallback(async () => {
+    setSession(null)
+    setScreen('picker')
+  }, [])
+
+  const handleConfigChange = useCallback(
+    async (updates: Partial<AppConfigRemote>) => {
+      const payload: Record<string, unknown> = { ...updates }
+      await saveConfig(payload)
+      if (updates.window_alpha !== undefined) {
+        await electron()?.setOpacity?.(updates.window_alpha)
+      }
+      await refreshConfig()
+    },
+    [refreshConfig],
+  )
+
+  if (screen === 'loading' || !config) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#0a0a0a', gap: 12 }}>
-        <div className="titlebar" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 44 }} />
-        <Loader2 size={28} style={{ color: '#6366f1', animation: 'spin 1s linear infinite' }} />
-        <span style={{ fontSize: 13, color: '#555' }}>{loadingMsg}</span>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          height: '100vh',
+          gap: 12,
+        }}
+      >
+        <div
+          className="titlebar"
+          style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 44 }}
+        />
+        <Loader2
+          size={28}
+          style={{ color: 'var(--color-primary-hover)', animation: 'spin 1s linear infinite' }}
+        />
+        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{loadingMsg}</span>
       </div>
     )
   }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#0a0a0a' }}>
-      {/* Title bar */}
-      <div
-        className="titlebar"
-        style={{ height: 44, paddingLeft: 76, paddingRight: 16, display: 'flex', alignItems: 'center', borderBottom: '1px solid #1a1a1a', flexShrink: 0 }}
-      >
-        <span style={{ flex: 1, textAlign: 'center', fontSize: 13, color: '#444', fontWeight: 500, pointerEvents: 'none' }}>
-          Interview Assistant
-        </span>
-        <div className="no-drag" style={{ display: 'flex', gap: 3, background: '#141414', borderRadius: 8, padding: 3 }}>
-          {(['assistant', 'setup'] as Tab[]).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              style={{
-                padding: '4px 16px',
-                borderRadius: 6,
-                fontSize: 12,
-                fontWeight: 500,
-                border: 'none',
-                cursor: 'pointer',
-                background: tab === t ? '#262626' : 'transparent',
-                color: tab === t ? '#e8e8e8' : '#555',
-                transition: 'all 0.15s',
-              }}
-            >
-              {t === 'assistant' ? 'Assistant' : 'Setup'}
-            </button>
-          ))}
-        </div>
-      </div>
+  if (screen === 'onboarding') {
+    return (
+      <OnboardingWizard
+        onComplete={async () => {
+          localStorage.setItem(ONBOARDING_KEY, '1')
+          await refreshConfig()
+          const c = config
+          if (c?.has_device_token) setScreen('picker')
+          else setScreen('login')
+        }}
+      />
+    )
+  }
 
-      {/* Content */}
-      <div style={{ flex: 1, overflow: 'hidden' }}>
-        {tab === 'assistant'
-          ? <MainPanel config={config} />
-          : <SetupPanel config={config} onSave={setConfig} />
-        }
-      </div>
-    </div>
+  if (screen === 'login') {
+    return (
+      <LoginScreen
+        locale={config.locale}
+        onLinked={async () => {
+          await refreshConfig()
+          setScreen('picker')
+        }}
+      />
+    )
+  }
+
+  if (screen === 'picker') {
+    return (
+      <SessionPickerScreen
+        locale={config.locale}
+        onSessionStarted={handleSessionStarted}
+        onOpenSettings={() => setScreen('settings')}
+        onLogout={handleLogout}
+      />
+    )
+  }
+
+  if (screen === 'settings') {
+    return (
+      <SettingsPanel
+        config={config}
+        session={session}
+        onChange={handleConfigChange}
+        onBack={() => setScreen(session ? 'main' : 'picker')}
+        onLogout={handleLogout}
+      />
+    )
+  }
+
+  // main
+  if (!session) {
+    // No session but routed to main: recover
+    setScreen('picker')
+    return null
+  }
+  return (
+    <MainPanel
+      config={config}
+      session={session}
+      onOpenSettings={() => setScreen('settings')}
+      onSessionEnded={handleSessionEnded}
+    />
   )
 }

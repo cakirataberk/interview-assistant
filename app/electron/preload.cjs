@@ -10,4 +10,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   blackholeCheck: () => ipcRenderer.invoke('blackhole-check'),
   blackholeInstall: () => ipcRenderer.invoke('blackhole-install'),
   onBlackholeProgress: (callback) => ipcRenderer.on('blackhole-progress', (_event, data) => callback(data)),
+
+  // Deep-link auth
+  startLinkFlow: (locale) => ipcRenderer.invoke('start-link-flow', locale),
+  getApiBase: () => ipcRenderer.invoke('get-api-base'),
+  onLinkProgress: (callback) => ipcRenderer.on('link-progress', (_event, stage) => callback(stage)),
+  onLinkDone: (callback) => ipcRenderer.on('link-done', (_event, data) => callback(data)),
+  onLinkError: (callback) => ipcRenderer.on('link-error', (_event, data) => callback(data)),
 })
