@@ -29,7 +29,12 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        { "target": "dmg", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "icon": "public/icon.icns",
       "darkModeSupport": true,
@@ -37,12 +42,29 @@
     },
     "dmg": {
       "title": "Interview Assistant ${version}",
-      "window": { "width": 600, "height": 420 },
+      "window": {
+        "width": 600,
+        "height": 420
+      },
       "backgroundColor": "#0a0a0a",
       "contents": [
-        { "x": 180, "y": 220, "type": "file" },
-        { "x": 420, "y": 220, "type": "link", "path": "/Applications" },
-        { "x": 180, "y": 380, "type": "file", "path": "build/Install.command" }
+        {
+          "x": 180,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 420,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 180,
+          "y": 380,
+          "type": "file",
+          "path": "build/Install.command"
+        }
       ]
     },
     "files": [
@@ -53,17 +75,22 @@
       {
         "from": "../backend",
         "to": "backend",
-        "filter": ["**/*.py"]
+        "filter": [
+          "**/*.py"
+        ]
       }
     ]
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
     "clsx": "^2.1.1",
+    "cors": "^2.8.6",
+    "express": "^4.22.1",
     "lucide-react": "^1.7.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "tailwindcss": "^4.2.2"
+    "tailwindcss": "^4.2.2",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
