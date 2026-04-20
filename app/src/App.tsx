@@ -18,7 +18,6 @@ type Screen = 'loading' | 'login' | 'picker' | 'main' | 'settings' | 'onboarding
 
 type ElectronAPI = {
   onBackendReady?: (cb: (r: boolean) => void) => void
-  onSetupProgress?: (cb: (msg: string) => void) => void
   startLinkFlow?: (locale: string) => Promise<{ ok: boolean; state: string }>
   onLinkProgress?: (cb: (stage: string) => void) => void
   onLinkDone?: (cb: (data: { ok: boolean }) => void) => void
@@ -95,15 +94,6 @@ export default function App() {
   useEffect(() => {
     const api = electron()
     if (api?.onBackendReady) {
-      api.onSetupProgress?.((msg) => {
-        if (msg === 'SETUP_REQUIRED') setLoadingMsg('İlk kurulum tamamlanıyor…')
-        else if (msg.startsWith('INSTALLING:')) {
-          const parts = msg.split(':')
-          setLoadingMsg(`Paketler kuruluyor (${parts[1]})…`)
-        } else if (msg === 'SETUP_DONE' || msg === 'ENV_READY') {
-          setLoadingMsg('Arka plan hazırlanıyor…')
-        }
-      })
       api.onBackendReady((ready) => {
         if (ready) bootstrap()
         else setLoadingMsg('Arka plan başlatılamadı. Uygulamayı yeniden başlat.')
@@ -226,6 +216,7 @@ export default function App() {
         onSessionStarted={handleSessionStarted}
         onOpenSettings={() => setScreen('settings')}
         onLogout={handleLogout}
+        onConfigChange={handleConfigChange}
       />
     )
   }

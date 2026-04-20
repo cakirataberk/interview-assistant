@@ -6,7 +6,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getOpacity: () => ipcRenderer.invoke('get-opacity'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   onBackendReady: (callback) => ipcRenderer.on('backend-ready', (_event, ready) => callback(ready)),
-  onSetupProgress: (callback) => ipcRenderer.on('setup-progress', (_event, msg) => callback(msg)),
   blackholeCheck: () => ipcRenderer.invoke('blackhole-check'),
   blackholeInstall: () => ipcRenderer.invoke('blackhole-install'),
   onBlackholeProgress: (callback) => ipcRenderer.on('blackhole-progress', (_event, data) => callback(data)),
