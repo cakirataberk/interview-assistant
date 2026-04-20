@@ -18,7 +18,6 @@ type Screen = 'loading' | 'login' | 'picker' | 'main' | 'settings' | 'onboarding
 
 type ElectronAPI = {
   onBackendReady?: (cb: (r: boolean) => void) => void
-  onSetupProgress?: (cb: (msg: string) => void) => void
   startLinkFlow?: (locale: string) => Promise<{ ok: boolean; state: string }>
   onLinkProgress?: (cb: (stage: string) => void) => void
   onLinkDone?: (cb: (data: { ok: boolean }) => void) => void
@@ -93,37 +92,37 @@ export default function App() {
   }, [refreshConfig, refreshSession])
 
   useEffect(() => {
-    const api = electron()
-    if (api?.onBackendReady) {
-      api.onSetupProgress?.((msg) => {
-        if (msg === 'SETUP_REQUIRED') setLoadingMsg('İlk kurulum tamamlanıyor…')
-        else if (msg.startsWith('INSTALLING:')) {
-          const parts = msg.split(':')
-          setLoadingMsg(`Paketler kuruluyor (${parts[1]})…`)
-        } else if (msg === 'SETUP_DONE' || msg === 'ENV_READY') {
-          setLoadingMsg('Arka plan hazırlanıyor…')
-        }
-      })
-      api.onBackendReady((ready) => {
-        if (ready) bootstrap()
-        else setLoadingMsg('Arka plan başlatılamadı. Uygulamayı yeniden başlat.')
-      })
-    } else {
-      // Browser dev mode: poll until backend is alive
-      const poll = async () => {
-        for (let i = 0; i < 60; i++) {
-          try {
-            await fetch('http://127.0.0.1:7432/health')
-            bootstrap()
-            return
-          } catch {
-            await new Promise((r) => setTimeout(r, 1000))
-          }
-        }
-        setLoadingMsg('Arka plan bulunamadı.')
-      }
-      poll()
+    let booted = false
+    const tryBoot = () => {
+      if (booted) return
+      booted = true
+      bootstrap()
     }
+
+    const api = electron()
+    api?.onBackendReady?.((ready) => {
+      if (ready) tryBoot()
+      else if (!booted) setLoadingMsg('Arka plan başlatılamadı. Uygulamayı yeniden başlat.')
+    })
+
+    // Always poll /health too — the backend-ready IPC can race with React mount
+    // and silently drop the event. Polling is the source of truth.
+    const poll = async () => {
+      for (let i = 0; i < 60 && !booted; i++) {
+        try {
+          const r = await fetch('http://127.0.0.1:7432/health')
+          if (r.ok) {
+            tryBoot()
+            return
+          }
+        } catch {
+          // not up yet
+        }
+        await new Promise((r) => setTimeout(r, 500))
+      }
+      if (!booted) setLoadingMsg('Arka plan bulunamadı.')
+    }
+    poll()
   }, [bootstrap])
 
   // Link flow listeners — applies once per app lifetime
@@ -226,6 +225,7 @@ export default function App() {
         onSessionStarted={handleSessionStarted}
         onOpenSettings={() => setScreen('settings')}
         onLogout={handleLogout}
+        onConfigChange={handleConfigChange}
       />
     )
   }

@@ -23,6 +23,10 @@ app/dist/
 # Local runtime data
 recordings/
 
+# Whisper model weights (downloaded at build/dev time, never committed)
+models/
+*.bin
+
 # Screenshots: keep only curated README images
 screenshots/*
 !screenshots/main.png

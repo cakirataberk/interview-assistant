@@ -1,7 +1,7 @@
 {
   "name": "interview-assistant",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "AI-powered real-time interview copilot",
   "author": "msc35",
@@ -10,8 +10,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vite build && electron-builder --mac --publish never && bash build/create-dmg.sh",
-    "preview": "vite preview"
+    "electron:build": "npm run prepare-models && vite build && electron-builder --mac --publish never && bash build/create-dmg.sh",
+    "prepare-models": "node scripts/download-models.cjs",
+    "preview": "vite preview",
+    "postinstall": "electron-builder install-app-deps"
   },
   "repository": {
     "type": "git",
@@ -29,7 +31,12 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        { "target": "dmg", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "icon": "public/icon.icns",
       "darkModeSupport": true,
@@ -37,12 +44,25 @@
     },
     "dmg": {
       "title": "Interview Assistant ${version}",
-      "window": { "width": 600, "height": 420 },
+      "window": {
+        "width": 600,
+        "height": 400
+      },
+      "iconSize": 100,
+      "iconTextSize": 12,
       "backgroundColor": "#0a0a0a",
       "contents": [
-        { "x": 180, "y": 220, "type": "file" },
-        { "x": 420, "y": 220, "type": "link", "path": "/Applications" },
-        { "x": 180, "y": 380, "type": "file", "path": "build/Install.command" }
+        {
+          "x": 150,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 450,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "files": [
@@ -51,19 +71,23 @@
     ],
     "extraResources": [
       {
-        "from": "../backend",
-        "to": "backend",
-        "filter": ["**/*.py"]
+        "from": "../models/ggml-small.bin",
+        "to": "models/ggml-small.bin"
       }
     ]
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
     "clsx": "^2.1.1",
+    "cors": "^2.8.6",
+    "express": "^4.22.1",
     "lucide-react": "^1.7.0",
+    "naudiodon2": "^2.5.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "tailwindcss": "^4.2.2"
+    "smart-whisper": "^0.8.1",
+    "tailwindcss": "^4.2.2",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

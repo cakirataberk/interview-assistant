@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, systemPreferences } = require('electron')
+const { app, BrowserWindow, ipcMain, shell } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const fs = require('fs')
@@ -7,16 +7,14 @@ const crypto = require('crypto')
 const http = require('http')
 const https = require('https')
 
-const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+const { startBackendServer, stopBackendServer } = require('./server/index.cjs')
 
-const VENV_DIR = path.join(os.homedir(), '.interview_assistant', 'venv')
-const SETUP_MARKER = path.join(os.homedir(), '.interview_assistant', '.setup_done')
+const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 const API_BASE = process.env.BASVUR_API_BASE || 'https://basvur-ai.vercel.app'
 const DEEP_LINK_SCHEME = 'basvurai'
 
 let mainWindow = null
-let pythonProcess = null
 let pendingLinkState = null
 let pendingDeepLink = null
 
@@ -35,145 +33,6 @@ if (process.defaultApp) {
   }
 } else {
   app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME)
-}
-
-// ── Python paths ────────────────────────────────────────────────────────────
-
-function getBackendDir() {
-  if (isDev) return path.join(__dirname, '../../backend')
-  return path.join(process.resourcesPath, 'backend')
-}
-
-function getPythonExecutable() {
-  // 1. Persistent user venv (after first-run setup)
-  const venvPython = path.join(VENV_DIR, 'bin', 'python3')
-  if (fs.existsSync(venvPython)) return venvPython
-
-  // 2. Dev project venv
-  if (isDev) {
-    const devVenv = path.join(__dirname, '../../.venv/bin/python3')
-    if (fs.existsSync(devVenv)) return devVenv
-  }
-
-  // 3. Homebrew Python 3.11
-  const candidates = [
-    '/opt/homebrew/bin/python3.11',
-    '/opt/homebrew/opt/python@3.11/bin/python3.11',
-    '/usr/local/bin/python3.11',
-  ]
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p
-  }
-  return 'python3'
-}
-
-function needsSetup() {
-  return !fs.existsSync(SETUP_MARKER)
-}
-
-// ── First-run setup ─────────────────────────────────────────────────────────
-
-function runSetup() {
-  return new Promise((resolve) => {
-    const backendDir = getBackendDir()
-    const setupScript = path.join(backendDir, 'setup_env.py')
-
-    // Find any available python3 to bootstrap
-    const bootstrapCandidates = [
-      '/opt/homebrew/bin/python3.11',
-      '/opt/homebrew/opt/python@3.11/bin/python3.11',
-      '/usr/local/bin/python3.11',
-      '/usr/bin/python3',
-    ]
-    let bootstrapPy = 'python3'
-    for (const p of bootstrapCandidates) {
-      if (fs.existsSync(p)) { bootstrapPy = p; break }
-    }
-
-    const proc = spawn(bootstrapPy, [setupScript], {
-      env: {
-        ...process.env,
-        PATH: `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${process.env.PATH}`,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    proc.stdout.on('data', (data) => {
-      const lines = data.toString().split('\n').filter(Boolean)
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line)
-          if (mainWindow) mainWindow.webContents.send('setup-progress', obj.status)
-        } catch { /* ignore non-JSON lines */ }
-      }
-    })
-
-    proc.on('exit', (code) => {
-      resolve(code === 0)
-    })
-  })
-}
-
-// ── Python server ────────────────────────────────────────────────────────────
-
-function startPythonServer() {
-  try { require('child_process').execSync('lsof -ti :7432 | xargs kill -9', { stdio: 'ignore' }) } catch {}
-  const python = getPythonExecutable()
-  const backendDir = getBackendDir()
-  const serverScript = path.join(backendDir, 'server.py')
-
-  console.log(`Starting Python: ${python} ${serverScript}`)
-
-  pythonProcess = spawn(python, [serverScript], {
-    cwd: backendDir,
-    env: {
-      ...process.env,
-      PYTHONPATH: backendDir,
-      WHISPER_SKIP_CHECKSUM: '1',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-  })
-
-  pythonProcess.stdout.on('data', (d) => console.log(`[py] ${d.toString().trim()}`))
-  pythonProcess.stderr.on('data', (d) => {
-    const msg = d.toString().trim()
-    if (msg && !msg.includes('INFO:') && !msg.includes('FutureWarning') && !msg.includes('DeprecationWarning')) {
-      console.error(`[py!] ${msg}`)
-    }
-  })
-  pythonProcess.on('exit', (code) => {
-    console.log(`Python exited: ${code}`)
-    pythonProcess = null
-  })
-}
-
-function stopPythonServer() {
-  if (pythonProcess) {
-    try {
-      process.kill(-pythonProcess.pid, 'SIGKILL')
-    } catch {
-      pythonProcess.kill('SIGKILL')
-    }
-    pythonProcess = null
-  }
-}
-
-async function waitForBackend(maxMs = 30000) {
-  const start = Date.now()
-  while (Date.now() - start < maxMs) {
-    try {
-      await new Promise((resolve, reject) => {
-        const req = http.get('http://127.0.0.1:7432/health', (res) => resolve(res.statusCode === 200))
-        req.on('error', reject)
-        req.setTimeout(1000, () => { req.destroy(); reject(new Error('timeout')) })
-      })
-      return true
-    } catch {
-      await new Promise((r) => setTimeout(r, 500))
-    }
-  }
-  return false
 }
 
 // ── Deep link auth flow ─────────────────────────────────────────────────────
@@ -256,7 +115,6 @@ async function handleDeepLink(urlStr) {
     }
     const deviceToken = exchange.body.deviceToken
 
-    // Write to backend config so Python has the long-lived token
     const tokenWrite = await postJson('http://127.0.0.1:7432/auth/token', {
       device_token: deviceToken,
       api_base: API_BASE,
@@ -303,7 +161,6 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show()
-    // If a deep link arrived before the window was ready, replay it now
     if (pendingDeepLink) {
       const url = pendingDeepLink
       pendingDeepLink = null
@@ -319,11 +176,6 @@ ipcMain.handle('set-always-on-top', (_e, v) => mainWindow?.setAlwaysOnTop(v))
 ipcMain.handle('set-opacity', (_e, v) => mainWindow?.setOpacity(Math.min(1, Math.max(0.1, v))))
 ipcMain.handle('get-opacity', () => mainWindow?.getOpacity() ?? 1)
 ipcMain.handle('open-external', (_e, url) => shell.openExternal(url))
-ipcMain.handle('needs-setup', () => needsSetup())
-ipcMain.handle('run-setup', async () => {
-  const ok = await runSetup()
-  return ok
-})
 
 ipcMain.handle('start-link-flow', async (_e, locale = 'tr') => {
   const state = crypto.randomBytes(16).toString('hex')
@@ -351,7 +203,6 @@ ipcMain.handle('blackhole-install', () => {
 
     const { execSync } = require('child_process')
 
-    // Step 1: brew fetch (no sudo needed) to download the .pkg
     send('progress', 'Downloading BlackHole 2ch...')
     try {
       execSync('/opt/homebrew/bin/brew fetch --cask blackhole-2ch', {
@@ -363,7 +214,6 @@ ipcMain.handle('blackhole-install', () => {
       return resolve({ ok: false })
     }
 
-    // Step 2: find the downloaded .pkg in brew's cache
     let pkgPath = ''
     try {
       pkgPath = execSync('/opt/homebrew/bin/brew --cache --cask blackhole-2ch', {
@@ -379,7 +229,6 @@ ipcMain.handle('blackhole-install', () => {
 
     send('progress', 'Requesting administrator privileges...')
 
-    // Step 3: install .pkg via osascript (macOS shows password dialog, runs as root)
     const script = `do shell script "/usr/sbin/installer -pkg \\"${pkgPath}\\" -target /" with administrator privileges`
     const proc = spawn('osascript', ['-e', script], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -411,7 +260,6 @@ app.on('open-url', (event, url) => {
 })
 
 app.on('second-instance', (_e, argv) => {
-  // On Windows/Linux the deep-link URL arrives via argv on second launch
   const linkArg = argv.find((a) => a.startsWith(`${DEEP_LINK_SCHEME}://`))
   if (linkArg) {
     if (mainWindow) handleDeepLink(linkArg)
@@ -426,28 +274,37 @@ app.on('second-instance', (_e, argv) => {
 app.whenReady().then(async () => {
   createWindow()
 
-  // First-run setup if needed
-  if (needsSetup()) {
-    if (mainWindow) mainWindow.webContents.send('setup-progress', 'SETUP_REQUIRED')
-    const ok = await runSetup()
-    if (!ok) {
-      if (mainWindow) mainWindow.webContents.send('backend-ready', false)
-      return
-    }
+  try {
+    await startBackendServer({
+      apiBase: API_BASE,
+      onReady: () => notifyRenderer('backend-ready', true),
+      onError: (err) => {
+        console.error('[main] backend error:', err)
+        notifyRenderer('backend-ready', false)
+      },
+    })
+  } catch (err) {
+    console.error('[main] failed to start backend:', err)
+    notifyRenderer('backend-ready', false)
   }
-
-  startPythonServer()
-  const ready = await waitForBackend()
-  if (mainWindow) mainWindow.webContents.send('backend-ready', ready)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
-app.on('window-all-closed', () => {
-  stopPythonServer()
+app.on('window-all-closed', async () => {
+  await stopBackendServer()
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => stopPythonServer())
+app.on('before-quit', async (event) => {
+  if (stopBackendServer.called) return
+  event.preventDefault()
+  stopBackendServer.called = true
+  try {
+    await stopBackendServer()
+  } finally {
+    app.quit()
+  }
+})

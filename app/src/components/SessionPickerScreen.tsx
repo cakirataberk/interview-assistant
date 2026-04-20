@@ -11,16 +11,29 @@ import {
   ArrowRight,
   RefreshCw,
 } from 'lucide-react'
-import { endSession, getJobs, startSession, type JobOption } from '../lib/api'
+import {
+  endSession,
+  getJobs,
+  startSession,
+  type AppConfigRemote,
+  type JobOption,
+} from '../lib/api'
 
 interface Props {
   locale: string
   onSessionStarted: () => void
   onOpenSettings: () => void
   onLogout: () => void
+  onConfigChange: (updates: Partial<AppConfigRemote>) => Promise<void>
 }
 
-export function SessionPickerScreen({ locale, onSessionStarted, onOpenSettings, onLogout }: Props) {
+export function SessionPickerScreen({
+  locale,
+  onSessionStarted,
+  onOpenSettings,
+  onLogout,
+  onConfigChange,
+}: Props) {
   const [jobs, setJobs] = useState<JobOption[]>([])
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
@@ -47,6 +60,7 @@ export function SessionPickerScreen({ locale, onSessionStarted, onOpenSettings, 
         settings: 'Settings',
         logout: 'Logout',
         startError: 'Could not start session',
+        languageLabel: 'Interview language',
       }
     : {
         title: 'Hangi mülakata hazırlanıyorsun?',
@@ -63,7 +77,16 @@ export function SessionPickerScreen({ locale, onSessionStarted, onOpenSettings, 
         settings: 'Ayarlar',
         logout: 'Çıkış',
         startError: 'Oturum başlatılamadı',
+        languageLabel: 'Mülakat dili',
       }
+
+  const setLanguage = async (lang: 'tr' | 'en') => {
+    if (lang === locale) return
+    await onConfigChange({
+      locale: lang,
+      transcription_mode: lang === 'tr' ? 'Türkçe' : 'English',
+    })
+  }
 
   const loadJobs = async () => {
     setLoading(true)
@@ -168,12 +191,67 @@ export function SessionPickerScreen({ locale, onSessionStarted, onOpenSettings, 
             style={{
               fontSize: 13,
               color: 'var(--color-text-muted)',
-              marginBottom: 20,
+              marginBottom: 16,
               lineHeight: 1.6,
             }}
           >
             {labels.subtitle}
           </p>
+
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 10,
+              marginBottom: 20,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 12,
+                color: 'var(--color-text-muted)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+              }}
+            >
+              {labels.languageLabel}
+            </span>
+            <div
+              role="group"
+              aria-label={labels.languageLabel}
+              style={{
+                display: 'inline-flex',
+                background: 'var(--color-surface-solid)',
+                border: '1px solid var(--color-border-strong)',
+                borderRadius: 999,
+                padding: 2,
+              }}
+            >
+              {(['tr', 'en'] as const).map((lang) => {
+                const active = locale === lang
+                return (
+                  <button
+                    key={lang}
+                    onClick={() => setLanguage(lang)}
+                    className="no-drag"
+                    style={{
+                      border: 'none',
+                      borderRadius: 999,
+                      padding: '5px 14px',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      background: active ? 'var(--color-accent)' : 'transparent',
+                      color: active ? '#0a0a0a' : 'var(--color-text-muted)',
+                      transition: 'background 120ms, color 120ms',
+                    }}
+                  >
+                    {lang === 'tr' ? 'TR' : 'EN'}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
 
           <div
             style={{
