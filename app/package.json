@@ -10,7 +10,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vite build && electron-builder --mac --publish never && bash build/create-dmg.sh",
+    "electron:build": "npm run prepare-models && vite build && electron-builder --mac --publish never && bash build/create-dmg.sh",
+    "prepare-models": "node scripts/download-models.cjs",
     "preview": "vite preview"
   },
   "repository": {
@@ -66,6 +67,12 @@
     "files": [
       "dist/**/*",
       "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../models/ggml-medium.bin",
+        "to": "models/ggml-medium.bin"
+      }
     ]
   },
   "dependencies": {
