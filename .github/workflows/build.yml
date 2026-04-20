@@ -28,6 +28,10 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: Download whisper model
+        working-directory: app
+        run: npm run prepare-models
+
       - name: Build React + Electron + DMG
         working-directory: app
         run: npx vite build && npx electron-builder --mac --publish never && bash build/create-dmg.sh
@@ -37,9 +41,11 @@ jobs:
 
       - name: Rename DMG with tag version
         if: startsWith(github.ref, 'refs/tags/')
+        working-directory: app
         run: |
           TAG=${GITHUB_REF#refs/tags/}
-          mv "app/dist/Interview Assistant-1.0.0-arm64.dmg" "app/dist/Interview-Assistant-${TAG}-arm64.dmg"
+          VERSION=$(node -p "require('./package.json').version")
+          mv "dist/Interview Assistant-${VERSION}-arm64.dmg" "dist/Interview-Assistant-${TAG}-arm64.dmg"
 
       - name: Upload .dmg artifact
         uses: actions/upload-artifact@v4
@@ -48,7 +54,7 @@ jobs:
           path: app/dist/*.dmg
           retention-days: 30
 
-      - name: Create GitHub Release
+      - name: Attach DMG to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
