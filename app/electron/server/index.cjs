@@ -9,6 +9,7 @@ const sessionStore = require('./lib/sessionStore.cjs')
 const conversationHistory = require('./lib/conversationHistory.cjs')
 const heartbeat = require('./lib/heartbeat.cjs')
 const listenManager = require('./lib/listenManager.cjs')
+const wsCommands = require('./lib/wsCommands.cjs')
 const { loadConfig } = require('./lib/config.cjs')
 
 const healthRoute = require('./routes/health.cjs')
@@ -19,6 +20,7 @@ const jobsRoute = require('./routes/jobs.cjs')
 const devicesRoute = require('./routes/devices.cjs')
 const listenRoute = require('./routes/listen.cjs')
 const recordRoute = require('./routes/record.cjs')
+const suggestRoute = require('./routes/suggest.cjs')
 
 const PORT = 7432
 const HOST = '127.0.0.1'
@@ -46,6 +48,7 @@ function buildApp() {
   app.use(devicesRoute)
   app.use(listenRoute)
   app.use(recordRoute)
+  app.use(suggestRoute)
 
   app.use((err, _req, res, _next) => {
     console.error('[server] error:', err)
@@ -60,6 +63,11 @@ function attachWebSocket(server) {
   wsServer.on('connection', (socket) => {
     ws.register(socket)
     socket.send(JSON.stringify({ type: 'status', text: 'connected' }))
+    socket.on('message', (raw) => {
+      try { wsCommands.handleMessage(socket, raw.toString()) } catch (err) {
+        console.error('[ws] message error:', err)
+      }
+    })
   })
 }
 
