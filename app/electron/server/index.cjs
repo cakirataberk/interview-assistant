@@ -10,6 +10,7 @@ const conversationHistory = require('./lib/conversationHistory.cjs')
 const heartbeat = require('./lib/heartbeat.cjs')
 const listenManager = require('./lib/listenManager.cjs')
 const wsCommands = require('./lib/wsCommands.cjs')
+const whisper = require('./lib/whisper.cjs')
 const { loadConfig } = require('./lib/config.cjs')
 
 const healthRoute = require('./routes/health.cjs')
@@ -94,6 +95,20 @@ function startBackendServer(options = {}) {
     httpServer.listen(PORT, HOST, () => {
       console.log(`[server] listening on http://${HOST}:${PORT}`)
       runtimeOptions.onReady()
+
+      // Warm whisper in the background so the first listen segment
+      // doesn't pay the model-load cost. Don't block ready signal.
+      whisper.preload((evt) => {
+        if (evt.stage === 'loading') {
+          console.log('[whisper] preloading model:', evt.path)
+        } else if (evt.stage === 'ready') {
+          console.log('[whisper] model ready')
+          ws.broadcast({ type: 'status', text: 'ready' })
+        }
+      }).catch((err) => {
+        console.error('[whisper] preload failed:', err.message)
+      })
+
       resolve({ port: PORT, host: HOST })
     })
   })

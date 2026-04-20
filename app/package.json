@@ -71,8 +71,8 @@
     ],
     "extraResources": [
       {
-        "from": "../models/ggml-medium.bin",
-        "to": "models/ggml-medium.bin"
+        "from": "../models/ggml-small.bin",
+        "to": "models/ggml-small.bin"
       }
     ]
   },

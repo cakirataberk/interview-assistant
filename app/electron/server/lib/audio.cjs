@@ -47,6 +47,11 @@ function pickPreferredDeviceIndex(devices) {
 /**
  * Open a PortAudio input stream. The returned object has the same surface
  * as a Node Readable: `.on('data', buf)`, `.start()`, `.quit(cb)`.
+ *
+ * Built-in mics on Apple Silicon (MacBook Air etc.) often return silence
+ * when forced to 16 kHz — CoreAudio's HAL can't (or won't) resample for
+ * every device. So callers should open at the device's native rate
+ * (typically 48 kHz) and downsample afterwards via `downsample48to16()`.
  */
 function openInputStream({ deviceId, sampleRate, channelCount = 1, framesPerBuffer = 512 }) {
   if (!portAudio) throw new Error('naudiodon2 unavailable')
@@ -62,9 +67,29 @@ function openInputStream({ deviceId, sampleRate, channelCount = 1, framesPerBuff
   })
 }
 
+/**
+ * 3:1 average-decimation from 48 kHz to 16 kHz int16 mono.
+ * Buffer in (48 kHz int16) → Buffer out (16 kHz int16). Adequate for
+ * speech transcription; not suitable for high-fidelity audio.
+ */
+function downsample48to16(buf) {
+  const inView = buf instanceof Int16Array
+    ? buf
+    : new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2)
+  const outLen = Math.floor(inView.length / 3)
+  const outBuf = Buffer.allocUnsafe(outLen * 2)
+  const outView = new Int16Array(outBuf.buffer, outBuf.byteOffset, outLen)
+  for (let i = 0; i < outLen; i++) {
+    const j = i * 3
+    outView[i] = ((inView[j] + inView[j + 1] + inView[j + 2]) / 3) | 0
+  }
+  return outBuf
+}
+
 module.exports = {
   isAvailable,
   listInputDevices,
   pickPreferredDeviceIndex,
   openInputStream,
+  downsample48to16,
 }

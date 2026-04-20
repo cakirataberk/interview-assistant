@@ -32,6 +32,11 @@ function _modeToLang(mode) {
 }
 
 async function _runTranscription(pcm, language, isPartial) {
+  // Drop partials when one is already in flight — partial windows can
+  // pile up faster than whisper can chew through them, which is the
+  // root cause of "bulk transcribe" feel. Finals always run.
+  if (isPartial && pendingTranscriptions > 0) return
+
   pendingTranscriptions += 1
   ws.broadcast({ type: 'status', text: 'transcribing…' })
   try {
@@ -88,15 +93,23 @@ function start({ deviceIndex, mode }) {
     onFinal: (pcm) => { _runTranscription(pcm, language, false) },
   })
 
+  // Open at native 48 kHz (built-in Mac mics return silence at forced
+  // 16 kHz) and downsample 3:1 before VAD/whisper sees the buffer. The
+  // downstream pipeline still works in 16 kHz mono int16.
+  const NATIVE_RATE = 48000
+  const RATIO = NATIVE_RATE / SAMPLE_RATE
   stream = audio.openInputStream({
     deviceId: deviceIndex,
-    sampleRate: SAMPLE_RATE,
+    sampleRate: NATIVE_RATE,
     channelCount: 1,
-    framesPerBuffer: CHUNK_FRAMES,
+    framesPerBuffer: CHUNK_FRAMES * RATIO,
   })
 
   stream.on('data', (buf) => {
-    try { vad?.processChunk(buf) } catch (err) {
+    try {
+      const pcm16k = audio.downsample48to16(buf)
+      vad?.processChunk(pcm16k)
+    } catch (err) {
       console.error('[listen] vad error:', err)
     }
   })

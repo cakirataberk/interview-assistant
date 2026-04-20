@@ -12,7 +12,7 @@ let modelInstance = null
 let loadPromise = null
 let loadedModelPath = null
 
-const MODEL_FILENAME = process.env.WHISPER_MODEL_FILE || 'ggml-medium.bin'
+const MODEL_FILENAME = process.env.WHISPER_MODEL_FILE || 'ggml-small.bin'
 
 function _resolveModelPath() {
   if (process.env.WHISPER_MODEL_PATH && fs.existsSync(process.env.WHISPER_MODEL_PATH)) {

@@ -112,7 +112,7 @@ function downloadOne(name) {
 async function main() {
   const argv = process.argv.slice(2)
   const envList = (process.env.WHISPER_MODELS || '').split(/[,\s]+/).filter(Boolean)
-  const requested = argv.length > 0 ? argv : (envList.length > 0 ? envList : ['medium'])
+  const requested = argv.length > 0 ? argv : (envList.length > 0 ? envList : ['small'])
 
   console.log(`Models dir: ${MODELS_DIR}`)
   console.log(`Requested: ${requested.join(', ')}`)
