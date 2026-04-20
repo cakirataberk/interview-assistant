@@ -3,6 +3,7 @@ const { saveConfig, loadConfig } = require('../lib/config.cjs')
 const sessionStore = require('../lib/sessionStore.cjs')
 const conversationHistory = require('../lib/conversationHistory.cjs')
 const heartbeat = require('../lib/heartbeat.cjs')
+const listenManager = require('../lib/listenManager.cjs')
 
 const router = Router()
 
@@ -19,6 +20,7 @@ router.post('/auth/logout', async (_req, res) => {
   const jwt = sessionStore.getJwt()
   const apiBase = (loadConfig().api_base || '').replace(/\/$/, '')
 
+  listenManager.stop()
   heartbeat.stop()
 
   if (jwt) {

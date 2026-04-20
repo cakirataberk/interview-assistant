@@ -8,6 +8,7 @@ const ws = require('./ws.cjs')
 const sessionStore = require('./lib/sessionStore.cjs')
 const conversationHistory = require('./lib/conversationHistory.cjs')
 const heartbeat = require('./lib/heartbeat.cjs')
+const listenManager = require('./lib/listenManager.cjs')
 const { loadConfig } = require('./lib/config.cjs')
 
 const healthRoute = require('./routes/health.cjs')
@@ -15,6 +16,9 @@ const configRoute = require('./routes/config.cjs')
 const authRoute = require('./routes/auth.cjs')
 const sessionRoute = require('./routes/session.cjs')
 const jobsRoute = require('./routes/jobs.cjs')
+const devicesRoute = require('./routes/devices.cjs')
+const listenRoute = require('./routes/listen.cjs')
+const recordRoute = require('./routes/record.cjs')
 
 const PORT = 7432
 const HOST = '127.0.0.1'
@@ -39,6 +43,9 @@ function buildApp() {
   app.use(authRoute)
   app.use(sessionRoute)
   app.use(jobsRoute)
+  app.use(devicesRoute)
+  app.use(listenRoute)
+  app.use(recordRoute)
 
   app.use((err, _req, res, _next) => {
     console.error('[server] error:', err)
@@ -86,6 +93,7 @@ function startBackendServer(options = {}) {
 
 function stopBackendServer() {
   return new Promise((resolve) => {
+    listenManager.stop()
     heartbeat.stop()
     sessionStore.clear()
     conversationHistory.clear()

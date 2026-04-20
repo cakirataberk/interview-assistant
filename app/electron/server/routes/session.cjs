@@ -3,6 +3,7 @@ const { loadConfig } = require('../lib/config.cjs')
 const sessionStore = require('../lib/sessionStore.cjs')
 const conversationHistory = require('../lib/conversationHistory.cjs')
 const heartbeat = require('../lib/heartbeat.cjs')
+const listenManager = require('../lib/listenManager.cjs')
 
 const router = Router()
 
@@ -73,6 +74,7 @@ router.post('/session/start', async (req, res) => {
 })
 
 router.post('/session/end', async (_req, res) => {
+  listenManager.stop()
   heartbeat.stop()
   const jwt = sessionStore.getJwt()
   if (jwt) {
