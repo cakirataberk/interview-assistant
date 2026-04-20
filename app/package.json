@@ -12,7 +12,8 @@
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "npm run prepare-models && vite build && electron-builder --mac --publish never && bash build/create-dmg.sh",
     "prepare-models": "node scripts/download-models.cjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "electron-builder install-app-deps"
   },
   "repository": {
     "type": "git",
